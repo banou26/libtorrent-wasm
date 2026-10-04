@@ -7,12 +7,12 @@
     "build": "vite build"
   },
   "dependencies": {
-    "@fkn/lib": "file:../../../fkn/web/lib",
+    "@fkn/lib": "file:../../../horionsoftware/fkn-client/lib",
     "osra": "^0.4.2",
     "ip-address": "^10.1.0"
   },
   "overrides": {
-    "@fkn/lib": "file:../../../fkn/web/lib"
+    "@fkn/lib": "file:../../../horionsoftware/fkn-client/lib"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
