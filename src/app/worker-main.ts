@@ -1,4 +1,5 @@
 import { relayWorker } from '@fkn/lib'
+import { startRelay } from './start-relay'
 
 const $ = (id: string) => document.getElementById(id)!
 const log = (msg: string, cls = '') => {
@@ -18,12 +19,11 @@ const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'modu
 worker.onerror = (e) => log('worker onerror: ' + e.message, 'bad')
 
 setTimeout(() => {
-  try {
-    relayWorker(worker)
-    log('relayWorker installed', 'ok')
-  } catch (e: any) {
-    log('relayWorker FAIL: ' + (e?.message ?? e), 'bad')
-  }
+  startRelay(
+    () => relayWorker(worker),
+    () => log('relayWorker installed', 'ok'),
+    (e: any) => log('relayWorker FAIL: ' + (e?.message ?? e), 'bad'),
+  )
 }, 100)
 
 worker.onmessage = (e) => {

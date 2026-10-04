@@ -1,11 +1,11 @@
 import { relayWorker } from '@fkn/lib'
+import { startRelay } from './start-relay'
 
 const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })
 
 // Wait one tick for the iframe's contentWindow to attach; without this the worker's @fkn/lib/{net,dgram} calls have no transport.
 setTimeout(() => {
-  try { relayWorker(worker) }
-  catch (e) { console.error('relayWorker failed:', e) }
+  startRelay(() => relayWorker(worker), () => {}, e => console.error('relayWorker failed:', e))
 }, 100)
 
 const $ = (id: string) => document.getElementById(id)!
