@@ -966,7 +966,7 @@ addToLibrary({
   js_disk_read__deps: ['$FKN'],
   js_disk_read(id, jobLo, jobHi, fileIdx, offsetLo, offsetHi, len) {
     FKN.stats.diskRead++
-    const offset = offsetLo + offsetHi * 0x100000000
+    const offset = (offsetLo >>> 0) + offsetHi * 0x100000000
     if (!FKN.storage) {
       // mirror libtorrent's built-in disabled_disk_io: returning EINVAL instead makes libtorrent retry forever
       const ptr = _malloc(len)
@@ -998,7 +998,7 @@ addToLibrary({
   js_disk_write__deps: ['$FKN'],
   js_disk_write(id, jobLo, jobHi, fileIdx, offsetLo, offsetHi, dataPtr, len) {
     FKN.stats.diskWrite++
-    const offset = offsetLo + offsetHi * 0x100000000
+    const offset = (offsetLo >>> 0) + offsetHi * 0x100000000
     if (!FKN.storage) {
       Module._lt_disk_complete_write(jobLo, jobHi, 0)
       return
