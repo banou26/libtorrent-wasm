@@ -472,6 +472,12 @@ export interface StreamWindowOptions {
    * selection rather than the whole torrent.
    */
   unclaimedPriority?: number
+  /**
+   * Piece ranges, `start` inclusive and `end` exclusive, outside which a claimed file's pieces get
+   * `unclaimedPriority` too, for a caller that keeps only part of a file. The window at each claim's
+   * head is planned wherever it falls. Pair it with `unclaimedPriority: PRIORITY.skip`.
+   */
+  keep?: ReadonlyArray<{ start: number, end: number }>
   /** Also set the torrent's sequential_download flag. Default true. */
   sequential?: boolean
   /**
@@ -797,6 +803,8 @@ export class Session {
     const unclaimedPriority = opts.unclaimedPriority ?? PRIORITY.normal
 
     const prios = new Uint8Array(numPieces).fill(unclaimedPriority)
+    const kept = opts.keep && new Uint8Array(numPieces)
+    if (kept) for (const { start, end } of opts.keep!) kept.fill(1, Math.max(0, start), Math.max(0, end))
     // piece -> deadline, keeping the most urgent where two readers overlap
     const ladder = new Map<number, number>()
 
@@ -809,7 +817,7 @@ export class Session {
       const p1 = Math.min(numPieces - 1, Math.floor((file.offset + file.size - 1) / pieceLength))
       // written after the unclaimed fill so a piece straddling a file boundary keeps the claimed
       // value: skipping it would refuse bytes this file needs
-      for (let p = p0; p <= p1; p++) prios[p] = claimedPriority
+      for (let p = p0; p <= p1; p++) if (!kept || kept[p]) prios[p] = claimedPriority
       const at = Math.min(Math.max(claim.offset, 0), Math.max(0, file.size - 1))
       const head = Math.min(Math.max(Math.floor((file.offset + at) / pieceLength), p0), p1)
       for (let k = 0; k < windowPieces; k++) {

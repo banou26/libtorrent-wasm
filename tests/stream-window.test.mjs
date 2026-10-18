@@ -517,3 +517,23 @@ test('a state update from before the forget does not put the pieces back', async
     assert.deepEqual(alerts.map((a) => a.type), [0x1234], 'an alert drained by the forget was lost')
   } finally { session.destroy() }
 })
+
+test('keep plans unclaimed priority outside its ranges and the claimed one inside', async () => {
+  const { mod, session, pieceLength } = await setup()
+  const keep = [{ start: 0, end: 2 }, { start: 18, end: 40 }]
+  try {
+    session.setStreamWindow(1, [{ fileIndex: 0, offset: 20 * pieceLength }], { windowPieces: 2, unclaimedPriority: PRIORITY.skip, keep })
+    const prios = lastPrios(mod)
+    assert.deepEqual([...prios.subarray(0, 3)], [PRIORITY.normal, PRIORITY.normal, PRIORITY.skip])
+    assert.deepEqual([...prios.subarray(17, 23)], [PRIORITY.skip, PRIORITY.normal, PRIORITY.normal, PRIORITY.top, PRIORITY.top, PRIORITY.normal])
+    assert.deepEqual([...prios.subarray(39, 42)], [PRIORITY.normal, PRIORITY.skip, PRIORITY.skip])
+    assert.deepEqual(deadlines(mod).map((d) => d.piece), [20, 21])
+    assert.equal(session.piecePriorities(1)[2], PRIORITY.skip, 'a finished read would put back the planned skip')
+
+    // a claim outside every range still gets its window
+    mod.calls.length = 0
+    session.setStreamWindow(1, [{ fileIndex: 0, offset: 90 * pieceLength }], { windowPieces: 2, unclaimedPriority: PRIORITY.skip, keep })
+    assert.deepEqual([...lastPrios(mod).subarray(89, 93)], [PRIORITY.skip, PRIORITY.top, PRIORITY.top, PRIORITY.skip])
+    assert.deepEqual(deadlines(mod).map((d) => d.piece), [90, 91])
+  } finally { session.destroy() }
+})
