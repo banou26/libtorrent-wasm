@@ -17,10 +17,9 @@ import { waitFor } from './rig/peer-handshake.mjs'
 const MiB = 1 << 20
 const PIECES = 96
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const range = (a, b) => Array.from({ length: b - a }, (_, i) => a + i)
 
-test('forgotten pieces leave the bitfield, stay missing while skipped and download again intact', async (t) => {
+test('forgotten pieces leave the bitfield and download again intact, and busy ones are left alone', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-forget-swarm-'))
   const fixtureDir = path.join(root, 'fixture')
   const file = path.join(fixtureDir, 'fixture.bin')
@@ -50,50 +49,39 @@ test('forgotten pieces leave the bitfield, stay missing while skipped and downlo
   await rig.waitForMetadata(h)
   const have = (p) => { const bf = s.bitfield(h); return !!bf && (bf.pieces[p >> 3] & (0x80 >> (p & 7))) !== 0 }
   const held = (a, b) => range(a, b).filter(have).length
-  const healthy = (what) => {
-    const st = s.status(h)
-    assert.equal(st.paused, false, `${what}: the torrent paused`)
-    assert.equal(st.errorCode, 0, `${what}: ${st.error}`)
-    assert.ok(st.numPeers >= 1, `${what}: the seeders left`)
-    assert.equal(st.state, TORRENT_STATE.downloading, `${what}: state ${st.state}`)
-  }
   const prios = new Uint8Array(PIECES).fill(PRIORITY.normal)
   s.prioritizePieces(h, prios)
   s.setSequential(h, true)
-
-  // a trickle once the head is in, so the rest stays wanted and the seeders stay connected
   await waitFor('pieces 0 to 23', () => held(0, 24) === 24, 120_000)
-  s.setDownloadLimit(h, 16 * 1024)
-  await sleep(1000)
-
-  assert.deepEqual(s.forgetPieces(h, range(PIECES - 8, PIECES)), { forgotten: 0, busy: 0 }, 'pieces never started')
-
-  prios.fill(PRIORITY.skip, 0, 8)
-  s.prioritizePieces(h, prios)
-  assert.deepEqual(s.forgetPieces(h, range(0, 8)), { forgotten: 8, busy: 0 })
-  assert.equal(held(0, 8), 0, 'the bitfield still shows forgotten pieces')
-  // what a storage that dropped the bytes leaves behind
-  const fd = fs.openSync(rig.storage.filePath(s.files(h).storageIndex, 0), 'r+')
-  fs.writeSync(fd, Buffer.alloc(8 * MiB), 0, 8 * MiB, 0)
-  fs.closeSync(fd)
-  await sleep(3000)
-  assert.equal(held(0, 8), 0, 'a skipped forgotten piece came back')
-  assert.equal(held(8, 24), 16, 'a piece that was not forgotten went missing')
-  healthy('while skipped')
-
-  prios.fill(PRIORITY.normal, 0, 8)
-  s.prioritizePieces(h, prios)
-  s.setDownloadLimit(h, 0)
-  await waitFor('pieces 0 to 7 again', () => held(0, 8) === 8, 60_000)
-  healthy('once wanted again')
-  const head = await s.read(h, 0, 0, 8 * MiB)
-  assert.ok(Buffer.from(head).equals(bytes.subarray(0, 8 * MiB)), 'the pieces downloaded again differ from the fixture')
 
   // everything still missing, while it downloads at full speed
   const missing = range(0, PIECES).filter((p) => !have(p))
   const midway = s.forgetPieces(h, missing)
   assert.ok(midway && midway.busy >= 1, `no piece was busy mid download: ${JSON.stringify(midway)}`)
   t.diagnostic(`mid download: ${JSON.stringify(midway)} of ${missing.length} missing`)
+  assert.deepEqual(s.forgetPieces(h, range(PIECES - 8, PIECES)), { forgotten: 0, busy: 0 }, 'pieces never started')
+
+  // skipped and wanted pieces forgotten and dropped, then the skipped ones wanted again, as a seek back
+  // does. That a skipped piece is not asked for meanwhile is tested in forget-pieces.test.mjs, where a
+  // scripted seed sees every request
+  prios.fill(PRIORITY.skip, 0, 8)
+  s.prioritizePieces(h, prios)
+  assert.deepEqual(s.forgetPieces(h, range(0, 8)), { forgotten: 8, busy: 0 })
+  assert.deepEqual(s.forgetPieces(h, range(8, 12)), { forgotten: 4, busy: 0 })
+  assert.equal(held(0, 12), 0, 'the bitfield still shows forgotten pieces')
+  const fd = fs.openSync(rig.storage.filePath(s.files(h).storageIndex, 0), 'r+')
+  fs.writeSync(fd, Buffer.alloc(12 * MiB), 0, 12 * MiB, 0)
+  fs.closeSync(fd)
+  prios.fill(PRIORITY.normal, 0, 8)
+  s.prioritizePieces(h, prios)
+  await waitFor('pieces 0 to 11 again', () => held(0, 12) === 12, 60_000)
+  assert.equal(held(12, 24), 12, 'a piece that was not forgotten went missing')
+  const st = s.status(h)
+  assert.equal(st.paused, false, 'the torrent paused')
+  assert.equal(st.errorCode, 0, st.error)
+  assert.ok([TORRENT_STATE.downloading, TORRENT_STATE.seeding].includes(st.state), `state ${st.state}`)
+  const head = await s.read(h, 0, 0, 12 * MiB)
+  assert.ok(Buffer.from(head).equals(bytes.subarray(0, 12 * MiB)), 'the pieces downloaded again differ from the fixture')
 
   await waitFor('the whole file', () => held(0, PIECES) === PIECES && s.status(h).state === TORRENT_STATE.seeding, 120_000)
   const all = await s.read(h, 0, 0, PIECES * MiB)

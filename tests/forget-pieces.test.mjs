@@ -9,6 +9,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { PRIORITY, TORRENT_STATE } from '../build/index.js'
+import { FIXTURES, MANIFEST, contentFor, layOut } from './fixtures/v2.mjs'
 import { Rig } from './rig/harness.mjs'
 import { makeTorrent, writeFixture } from './rig/make-torrent.mjs'
 import { waitFor } from './rig/peer-handshake.mjs'
@@ -21,22 +22,9 @@ const PIECES = 16
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** A fixture, its torrent, and an engine holding it, with `onDisk` pieces already in place. */
-const setup = async (t, { onDisk = [] } = {}) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-forget-'))
-  const fixture = path.join(root, 'fixture.bin')
-  writeFixture(fixture, PIECES * PIECE)
-  const meta = makeTorrent({ file: fixture, pieceLength: PIECE })
-  const bytes = fs.readFileSync(fixture)
-  const storageDir = path.join(root, 'download')
-  if (onDisk.length) {
-    const laid = Buffer.alloc(bytes.length)
-    for (const p of onDisk) bytes.copy(laid, p * PIECE, p * PIECE, (p + 1) * PIECE)
-    fs.mkdirSync(path.join(storageDir, 'dl'), { recursive: true })
-    fs.writeFileSync(path.join(storageDir, 'dl', meta.name), laid)
-  }
-
-  const rig = new Rig({ storageDir, enableDht: false })
+/** An engine holding `torrent`, saved under `root`, once its check has found `held` pieces. */
+const engine = async (t, root, torrent, held) => {
+  const rig = new Rig({ storageDir: path.join(root, 'download'), enableDht: false })
   const peers = []
   t.after(async () => {
     for (const p of peers) p.close()
@@ -44,27 +32,47 @@ const setup = async (t, { onDisk = [] } = {}) => {
     fs.rmSync(root, { recursive: true, force: true })
   })
   await rig.start()
-  const handle = rig.session.addTorrentFile(meta.torrent, '/dl')
+  const session = rig.session
+  const handle = session.addTorrentFile(torrent, '/dl')
   assert.ok(handle >= 0 && handle < 0xFFFFFF00, `add failed, handle ${handle}`)
   rig.startPump([handle])
   await waitFor('the check to finish', () => {
-    const st = rig.session.status(handle)
+    const st = session.status(handle)
     return st && st.state !== TORRENT_STATE.checkingFiles && st.state !== TORRENT_STATE.checkingResumeData
-      && st.numPiecesHave === onDisk.length
+      && st.numPiecesHave === held
   })
   const have = (p) => {
-    const bf = rig.session.bitfield(handle)
+    const bf = session.bitfield(handle)
     return !!bf && (bf.pieces[p >> 3] & (0x80 >> (p & 7))) !== 0
   }
   const dial = async (opts = {}) => {
-    const peer = new ScriptedPeer({ infoHash: meta.infoHash, port: rig.session.reachable().port, ...opts })
+    const peer = new ScriptedPeer({ infoHash: session.infohash(handle), port: session.reachable().port, ...opts })
     peers.push(peer)
     await waitFor('the listener', () => rig.metrics.listening.tcp)
     await peer.connect()
     return peer
   }
-  return { rig, session: rig.session, handle, meta, bytes, have, dial }
+  return { rig, session, handle, have, dial }
 }
+
+/** A fixture, its torrent, and an engine holding it, with `onDisk` pieces already in place. */
+const setup = async (t, { onDisk = [] } = {}) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-forget-'))
+  const fixture = path.join(root, 'fixture.bin')
+  writeFixture(fixture, PIECES * PIECE)
+  const meta = makeTorrent({ file: fixture, pieceLength: PIECE })
+  const bytes = fs.readFileSync(fixture)
+  if (onDisk.length) {
+    const laid = Buffer.alloc(bytes.length)
+    for (const p of onDisk) bytes.copy(laid, p * PIECE, p * PIECE, (p + 1) * PIECE)
+    fs.mkdirSync(path.join(root, 'download', 'dl'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'download', 'dl', meta.name), laid)
+  }
+  return { ...(await engine(t, root, meta.torrent, onDisk.length)), bytes }
+}
+
+const onlyPieceZero = (session, handle) => session.prioritizePieces(handle,
+  Uint8Array.from({ length: PIECES }, (_, p) => (p === 0 ? PRIORITY.normal : PRIORITY.skip)))
 
 test('a forgotten piece is withdrawn from a leech: its queued requests are rejected and lt_donthave sent', async (t) => {
   const { rig, session, handle, have, dial } = await setup(t, { onDisk: Array.from({ length: PIECES - 1 }, (_, i) => i) })
@@ -141,6 +149,44 @@ test('a partial piece with nothing in flight loses its blocks, so it downloads a
   assert.ok(Buffer.from(got).equals(bytes.subarray(0, wanted.length * PIECE)), 'the bytes differ from the fixture')
 })
 
+test('a skipped forgotten piece is never asked for while the rest finishes, and comes back intact once wanted', async (t) => {
+  const { rig, session, handle, bytes, have, dial } = await setup(t, { onDisk: Array.from({ length: PIECES - 1 }, (_, i) => i) })
+  const prios = new Uint8Array(PIECES).fill(PRIORITY.normal).fill(PRIORITY.skip, 0, 4)
+  session.prioritizePieces(handle, prios)
+  assert.deepEqual(session.forgetPieces(handle, [0, 1, 2, 3]), { forgotten: 4, busy: 0 })
+  // the control: forgotten as well, but wanted
+  assert.deepEqual(session.forgetPieces(handle, [4, 5]), { forgotten: 2, busy: 0 })
+  const fd = fs.openSync(rig.storage.filePath(session.files(handle).storageIndex, 0), 'r+')
+  fs.writeSync(fd, Buffer.alloc(6 * PIECE), 0, 6 * PIECE, 0)
+  fs.closeSync(fd)
+  const asked = (requests) => [...new Set(requests.map((r) => r.piece))].sort((a, b) => a - b)
+  const healthy = () => {
+    const st = session.status(handle)
+    assert.equal(st.paused, false, 'the torrent paused')
+    assert.equal(st.errorCode, 0, st.error)
+  }
+
+  const serve = (piece, offset, length) => bytes.subarray(piece * PIECE + offset, piece * PIECE + offset + length)
+  const first = await dial({ serve })
+  await waitFor('every wanted piece', () => [4, 5, PIECES - 1].every(have), 20_000)
+  assert.deepEqual(asked(first.requests), [4, 5, PIECES - 1], 'the engine asked for a skipped piece')
+  assert.equal([0, 1, 2, 3].filter(have).length, 0)
+  await waitFor('the torrent to finish', () => session.status(handle)?.state === TORRENT_STATE.finished)
+  healthy()
+
+  const before = first.requests.length
+  prios.fill(PRIORITY.normal, 0, 4)
+  session.prioritizePieces(handle, prios)
+  // a finished torrent closes its connections to seeds, so another one dials in
+  const second = await dial({ serve })
+  await waitFor('the skipped pieces once wanted', () => session.status(handle)?.state === TORRENT_STATE.seeding, 20_000)
+  assert.deepEqual(asked([...first.requests.slice(before), ...second.requests]), [0, 1, 2, 3])
+  assert.equal(rig.metrics.alerts.hashFailed, 0)
+  healthy()
+  const got = await session.read(handle, 0, 0, PIECES * PIECE)
+  assert.ok(Buffer.from(got).equals(bytes), 'the bytes differ from the fixture')
+})
+
 test('a seed refuses, and its bitfield is left alone', async (t) => {
   const { session, handle, have } = await setup(t, { onDisk: Array.from({ length: PIECES }, (_, i) => i) })
   assert.equal(session.forgetPieces(handle, [0, 1]), null)
@@ -155,4 +201,79 @@ test('a torrent that is checking refuses, and keeps the piece once the check is 
   assert.equal(session.forgetPieces(handle, [3]), null)
   await waitFor('the recheck to finish', () => session.forgetPieces(handle, []) !== null)
   assert.deepEqual(session.forgetPieces(handle, [3]), { forgotten: 1, busy: 0 })
+})
+
+test('a piece with a block still requested is busy and kept, so it completes from the blocks it had', async (t) => {
+  const { rig, session, handle, bytes, have, dial } = await setup(t)
+  onlyPieceZero(session, handle)
+  const last = PIECE - BLOCK
+  const seed = await dial({ serve: (_, offset, length) => (offset === last ? null : bytes.subarray(offset, offset + length)) })
+  await waitFor('every block to be asked for', () => seed.requests.length === PIECE / BLOCK)
+  await sleep(500)
+  assert.equal(have(0), false, 'the piece completed without its last block')
+
+  assert.deepEqual(session.forgetPieces(handle, [0]), { forgotten: 0, busy: 1 })
+  seed.send(0, last, bytes.subarray(last, PIECE))
+  await waitFor('the piece to complete', () => have(0), 10_000)
+  assert.equal(seed.requests.length, PIECE / BLOCK, 'blocks the engine had were asked for again')
+  assert.equal(rig.metrics.alerts.hashFailed, 0)
+  assert.ok(Buffer.from(await session.read(handle, 0, 0, PIECE)).equals(bytes.subarray(0, PIECE)), 'the bytes differ from the fixture')
+})
+
+test('a piece being hashed is busy and kept, so it completes without downloading again', async (t) => {
+  const { rig, session, handle, bytes, have, dial } = await setup(t)
+  // the hash reads the piece back from the storage, so holding reads keeps it hashing
+  const read = rig.storage.read.bind(rig.storage)
+  let release
+  const held = new Promise((resolve) => { release = resolve })
+  t.after(() => release())
+  rig.storage.read = (...args) => held.then(() => read(...args))
+  onlyPieceZero(session, handle)
+  const seed = await dial({ serve: (_, offset, length) => bytes.subarray(offset, offset + length) })
+  await waitFor('every block to be asked for', () => seed.requests.length === PIECE / BLOCK)
+  await sleep(500)
+  assert.equal(have(0), false, 'the piece passed while its hash read was held')
+
+  assert.deepEqual(session.forgetPieces(handle, [0]), { forgotten: 0, busy: 1 })
+  await sleep(1000)
+  release()
+  await waitFor('the piece to complete', () => have(0), 10_000)
+  assert.equal(seed.requests.length, PIECE / BLOCK, 'the engine downloaded the piece again')
+  assert.equal(rig.metrics.alerts.hashFailed, 0)
+  assert.ok(Buffer.from(await session.read(handle, 0, 0, PIECE)).equals(bytes.subarray(0, PIECE)), 'the bytes differ from the fixture')
+})
+
+test('a hybrid torrent forgets a piece and takes it back against its merkle tree', async (t) => {
+  const { pieceLength, kinds: { hybrid } } = MANIFEST.find((m) => m.case === 'pow2-pieces')
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-forget-v2-'))
+  // the last file stays off disk, so the check leaves a torrent that still has a picker
+  const onDisk = hybrid.files.slice(0, -1)
+  layOut(path.join(root, 'download', 'dl'), { files: onDisk })
+  const held = onDisk.reduce((n, f) => n + Math.ceil(f.size / pieceLength), 0)
+  const torrent = new Uint8Array(fs.readFileSync(path.join(FIXTURES, 'pow2-pieces.hybrid.torrent')))
+  const { rig, session, handle, have, dial } = await engine(t, root, torrent, held)
+
+  const geometry = session.files(handle)
+  // the v1 piece space, pads included, which is what a v1 peer is asked for
+  const space = Buffer.alloc(geometry.totalSize)
+  for (const f of hybrid.files) {
+    contentFor(f.seed, f.size).copy(space, geometry.files.find((g) => g.path === f.path.join('/')).offset)
+  }
+  const many = geometry.files.findIndex((g) => g.path.endsWith('d-many-pieces.bin'))
+  const { offset, size } = geometry.files[many]
+  // a piece wholly inside a file of several, so its merkle leaf sits among others
+  const piece = offset / pieceLength + 1
+  assert.deepEqual(session.forgetPieces(handle, [piece]), { forgotten: 1, busy: 0 })
+  assert.equal(have(piece), false, 'the bitfield still shows the forgotten piece')
+  const fd = fs.openSync(rig.storage.filePath(geometry.storageIndex, many), 'r+')
+  fs.writeSync(fd, Buffer.alloc(pieceLength), 0, pieceLength, piece * pieceLength - offset)
+  fs.closeSync(fd)
+
+  const seed = await dial({ serve: (p, at, length) => space.subarray(p * pieceLength + at, p * pieceLength + at + length) })
+  await waitFor('the torrent to complete', () => session.status(handle)?.state === TORRENT_STATE.seeding, 20_000)
+  assert.deepEqual([...new Set(seed.requests.map((r) => r.piece))].sort((a, b) => a - b), [piece, geometry.numPieces - 1])
+  assert.equal(rig.metrics.alerts.hashFailed, 0)
+  assert.equal(session.status(handle).errorCode, 0)
+  const got = await session.read(handle, many, 0, size)
+  assert.ok(Buffer.from(got).equals(space.subarray(offset, offset + size)), 'the file differs from the fixture')
 })

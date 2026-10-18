@@ -91,6 +91,11 @@ export class ScriptedPeer {
     this.#socket.write(frame(MSG.request, u32s(piece, offset, length)))
   }
 
+  /** Sends a block, for instance one that `serve` withheld when it was asked for. */
+  send(piece, offset, data) {
+    this.#socket.write(frame(MSG.piece, Buffer.concat([u32s(piece, offset), data])))
+  }
+
   close() {
     this.#socket?.destroy()
     this.#socket = null
@@ -108,7 +113,7 @@ export class ScriptedPeer {
       const length = payload.readUInt32BE(8)
       this.requests.push({ piece, offset, length })
       const data = this.#serve(piece, offset, length)
-      if (data) this.#socket.write(frame(MSG.piece, Buffer.concat([u32s(piece, offset), data])))
+      if (data) this.send(piece, offset, data)
     }
   }
 }
