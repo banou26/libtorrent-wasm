@@ -5,25 +5,26 @@ Subject: [PATCH] feat: forget pieces a streaming storage dropped
 
 ---
 diff --git a/include/libtorrent/torrent.hpp b/include/libtorrent/torrent.hpp
-index 3468274c4..848b1a35b 100644
+index 3468274c4..dec63502e 100644
 --- a/include/libtorrent/torrent.hpp
 +++ b/include/libtorrent/torrent.hpp
-@@ -877,6 +877,13 @@ namespace libtorrent {
+@@ -877,6 +877,14 @@ namespace libtorrent {
  			return m_picker->have_piece(index);
  		}
  
 +		// WASM patch: for a streaming storage that drops the bytes of these pieces. Each one held
 +		// becomes missing, its queued upload requests are rejected and peers are told through
 +		// lt_donthave. A partial piece with no block in flight loses its blocks; one with blocks
-+		// requested, writing, hashing or locked is left alone and counted in `busy`. Returns how
-+		// many held pieces were forgotten, or -1 for a seed or a torrent that is checking.
++		// requested or writing, or that is hashing, passed but not flushed, or locked, is left alone
++		// and counted in `busy`. Returns how many held pieces were forgotten, or -1 for a seed or a
++		// torrent that is checking.
 +		int forget_pieces(std::vector<piece_index_t> const& pieces, int& busy);
 +
  #ifndef TORRENT_DISABLE_PREDICTIVE_PIECES
  		// a predictive piece is a piece that we might
  		// not have yet, but still announced to peers, anticipating that
 diff --git a/src/peer_connection.cpp b/src/peer_connection.cpp
-index c5523d1c2..2cfb10ed3 100644
+index c5523d1c2..9b5365a1b 100644
 --- a/src/peer_connection.cpp
 +++ b/src/peer_connection.cpp
 @@ -2644,11 +2644,12 @@ namespace libtorrent {
@@ -44,10 +45,10 @@ index c5523d1c2..2cfb10ed3 100644
  
  			if (m_requests.empty())
 diff --git a/src/torrent.cpp b/src/torrent.cpp
-index 4f560cc7c..3e0c45c41 100644
+index 4f560cc7c..de17c5bbf 100644
 --- a/src/torrent.cpp
 +++ b/src/torrent.cpp
-@@ -4521,6 +4521,58 @@ namespace {
+@@ -4521,6 +4521,59 @@ namespace {
  		return ret;
  	}
  
@@ -62,6 +63,7 @@ index 4f560cc7c..3e0c45c41 100644
 +		bool const was_finished = is_finished();
 +		auto const queue = m_picker->get_download_queue();
 +		int forgotten = 0;
++		bool restored = false;
 +		for (piece_index_t const index : pieces)
 +		{
 +			if (index < piece_index_t(0) || index >= m_torrent_file->end_piece()) continue;
@@ -78,10 +80,10 @@ index 4f560cc7c..3e0c45c41 100644
 +					continue;
 +				}
 +				m_picker->restore_piece(index);
++				restored = true;
 +				continue;
 +			}
 +			m_picker->we_dont_have(index);
-+			inc_stats_counter(counters::num_have_pieces, -1);
 +			++forgotten;
 +			for (auto c : m_connections)
 +			{
@@ -95,8 +97,8 @@ index 4f560cc7c..3e0c45c41 100644
 +		{
 +			m_file_progress.clear();
 +			m_file_progress.init(picker(), m_torrent_file->files());
-+			set_need_save_resume(torrent_handle::if_download_progress);
 +		}
++		if (forgotten > 0 || restored) set_need_save_resume(torrent_handle::if_download_progress);
 +		update_gauge();
 +		state_updated();
 +		update_peer_interest(was_finished);
