@@ -1283,8 +1283,10 @@ LT_API int lt_torrent_cancel_piece_requests(std::uint32_t id, std::int32_t piece
   return 0;
 }
 
-// Inline rather than posted, so the caller knows on return that the engine no longer claims these
-// pieces and may delete their bytes. Call it between ticks, never from inside a disk callback.
+// Inline rather than posted, so on return the engine no longer claims these pieces and starts no new
+// upload read for them. A read already started or a late block from a peer can still reach their
+// bytes (Session.forgetPieces says what a deleting storage must do). Call it between ticks, never
+// from inside a disk callback.
 LT_API int lt_torrent_forget_pieces(std::uint32_t id, std::int32_t const* pieces, std::uint32_t count,
                                     std::int32_t* busy_out) {
   if (!g_session || !pieces) return -1;

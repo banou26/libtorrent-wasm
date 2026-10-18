@@ -1004,15 +1004,19 @@ export class Session {
    * Stop claiming pieces whose bytes a storage is about to drop, without stopping the torrent.
    *
    * Each listed piece the engine holds becomes missing: queued upload requests for it are rejected
-   * and peers that speak BEP 54 (lt_donthave) are told. A partial piece with no block in flight
-   * loses its downloaded blocks. A partial piece with blocks requested, being written or being
-   * hashed is left alone and counted in `busy`; ask again later. Set the pieces to priority 0 first,
-   * or they simply download again.
+   * and peers that speak BEP 54 (lt_donthave) are told. A partial piece with nothing in flight loses
+   * its downloaded blocks. A partial piece is left alone and counted in `busy` while a block of it is
+   * requested or being written, or while it is being hashed, has passed its hash but is not flushed
+   * yet, or is locked; ask again later. Set the pieces to priority 0 first, or they simply download
+   * again.
    *
-   * Synchronous: when it returns `busy: 0`, the engine neither holds nor is writing any listed piece,
-   * so their bytes may be deleted before the next tick. They also leave {@link bitfield} at once,
-   * rather than on the next state update. Save the resume data before deleting the bytes: a restart
-   * from the previous blob would claim the pieces again without checking them.
+   * Synchronous: on return the engine no longer claims the listed pieces and starts no new upload
+   * read for them, and they leave {@link bitfield} at once rather than on the next state update. It
+   * does not fence the storage: an upload read already started, a late block from a peer, and a
+   * {@link read} whose wait already resolved can still reach those bytes. A storage that deletes them
+   * must let the reads in flight finish, and make a write that arrives meanwhile wait for the
+   * removal. Save the resume data before deleting: a restart from the previous blob would claim the
+   * pieces again without checking them.
    *
    * Returns null, changing nothing, for a torrent that has every piece (a seed keeps no picker), one
    * that is checking, or a handle the engine does not know yet.
