@@ -47,6 +47,7 @@ nix build --no-link --print-out-paths 'nixpkgs#transmission_4'
 | `make-torrent.mjs` | bencode + trackerless torrent, no external tool |
 | `seeders.mjs` | a fleet of real transmission daemons |
 | `bad-peer.mjs` | a peer that claims pieces and does not deliver them |
+| `scripted-peer.mjs` | a peer that dials the engine, seed or leech, and records what it is sent |
 
 ## What it does not answer
 

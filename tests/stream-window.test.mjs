@@ -70,6 +70,15 @@ const makeModule = () => {
     _lt_torrent_prioritize_files: (h, ptr, n) => log('prioritize_files', h, HEAPU8.slice(ptr, ptr + n)),
     _lt_torrent_set_file_priority: (h, f, prio) => log('set_file_priority', h, f, prio),
     _lt_torrent_cancel_piece_requests: (h, p) => log('cancel_piece_requests', h, p),
+    // what the engine answers: `forgetAnswer` held pieces forgotten (-1 refuses), `forgetBusy` busy
+    forgetAnswer: 0,
+    forgetBusy: 0,
+    _lt_torrent_forget_pieces: (h, ptr, n, busyPtr) => {
+      const HEAP32 = new Int32Array(buffer)
+      log('forget_pieces', h, [...HEAP32.subarray(ptr >> 2, (ptr >> 2) + n)])
+      HEAP32[busyPtr >> 2] = mod.forgetBusy
+      return mod.forgetAnswer
+    },
     _lt_session_remove_torrent_ex: (h) => log('remove', h),
 
     // push a record into the alert buffer the next popAlerts() will drain
@@ -462,5 +471,49 @@ test('setFilePriorities sends one byte per file and invalidates the priority mir
     const call = mod.calls.find((c) => c.name === 'prioritize_files')
     assert.deepEqual([...call.args[1]], [PRIORITY.skip, PRIORITY.normal])
     assert.equal(session.piecePriorities(1), null, 'file priorities rewrite the piece map underneath us')
+  } finally { session.destroy() }
+})
+
+const held = (session, p) => (session.bitfield(1).pieces[p >> 3] & (0x80 >> (p & 7))) !== 0
+
+test('forgetPieces hands the engine the list and clears the pieces from the bitfield at once', async () => {
+  const { mod, session, numPieces } = await setup()
+  try {
+    mod.pushRecord(REC_STATE_UPDATE, stateUpdate({ numPieces, have: [2, 3, 4, 9] }))
+    session.popAlerts()
+    mod.forgetAnswer = 2
+    mod.forgetBusy = 1
+    assert.deepEqual(session.forgetPieces(1, [3, 4, 5]), { forgotten: 2, busy: 1 })
+    assert.deepEqual(mod.calls.find((c) => c.name === 'forget_pieces').args, [1, [3, 4, 5]])
+    assert.deepEqual([2, 3, 4, 9].map((p) => held(session, p)), [true, false, false, true])
+  } finally { session.destroy() }
+})
+
+test('a refused forgetPieces is null and leaves the bitfield as it was', async () => {
+  const { mod, session, numPieces } = await setup()
+  try {
+    mod.pushRecord(REC_STATE_UPDATE, stateUpdate({ numPieces, have: [3] }))
+    session.popAlerts()
+    mod.forgetAnswer = -1
+    assert.equal(session.forgetPieces(1, [3]), null)
+    assert.equal(held(session, 3), true)
+  } finally { session.destroy() }
+})
+
+test('a state update from before the forget does not put the pieces back', async () => {
+  // libtorrent captures a state update when it is posted, so one still queued at the forget
+  // carries the old have-set
+  const { mod, session, numPieces } = await setup()
+  try {
+    mod.pushRecord(REC_STATE_UPDATE, stateUpdate({ numPieces, have: [3] }))
+    session.popAlerts()
+    mod.pushRecord(REC_STATE_UPDATE, stateUpdate({ numPieces, have: [3, 4] }))
+    mod.pushRecord(0x1234, new Uint8Array(0))
+    mod.forgetAnswer = 2
+    session.forgetPieces(1, [3, 4])
+    const alerts = session.popAlerts()
+    assert.equal(held(session, 3), false)
+    assert.equal(held(session, 4), false)
+    assert.deepEqual(alerts.map((a) => a.type), [0x1234], 'an alert drained by the forget was lost')
   } finally { session.destroy() }
 })

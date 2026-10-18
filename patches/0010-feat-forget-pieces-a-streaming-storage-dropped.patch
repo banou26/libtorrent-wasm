@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Banou <me@banou.dev>
+Date: Mon, 19 Oct 2026 04:39:31 +0900
+Subject: [PATCH] feat: forget pieces a streaming storage dropped
+
+---
+diff --git a/include/libtorrent/torrent.hpp b/include/libtorrent/torrent.hpp
+index 3468274c4..848b1a35b 100644
+--- a/include/libtorrent/torrent.hpp
++++ b/include/libtorrent/torrent.hpp
+@@ -877,6 +877,13 @@ namespace libtorrent {
+ 			return m_picker->have_piece(index);
+ 		}
+ 
++		// WASM patch: for a streaming storage that drops the bytes of these pieces. Each one held
++		// becomes missing, its queued upload requests are rejected and peers are told through
++		// lt_donthave. A partial piece with no block in flight loses its blocks; one with blocks
++		// requested, writing, hashing or locked is left alone and counted in `busy`. Returns how
++		// many held pieces were forgotten, or -1 for a seed or a torrent that is checking.
++		int forget_pieces(std::vector<piece_index_t> const& pieces, int& busy);
++
+ #ifndef TORRENT_DISABLE_PREDICTIVE_PIECES
+ 		// a predictive piece is a piece that we might
+ 		// not have yet, but still announced to peers, anticipating that
+diff --git a/src/peer_connection.cpp b/src/peer_connection.cpp
+index c5523d1c2..2cfb10ed3 100644
+--- a/src/peer_connection.cpp
++++ b/src/peer_connection.cpp
+@@ -2644,11 +2644,12 @@ namespace libtorrent {
+ 	void peer_connection::reject_piece(piece_index_t const index)
+ 	{
+ 		TORRENT_ASSERT(is_single_thread());
+-		for (auto i = m_requests.begin(), end(m_requests.end()); i != end; ++i)
++		// WASM patch: upstream stepped over the request after each one it erased, so it rejected
++		// every other match, and kept going to the end() it read before erasing, past the real end
++		for (auto i = m_requests.begin(); i != m_requests.end();)
+ 		{
+-			peer_request const& r = *i;
+-			if (r.piece != index) continue;
+-			write_reject_request(r);
++			if (i->piece != index) { ++i; continue; }
++			write_reject_request(*i);
+ 			i = m_requests.erase(i);
+ 
+ 			if (m_requests.empty())
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index 4f560cc7c..3e0c45c41 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -4521,6 +4521,58 @@ namespace {
+ 		return ret;
+ 	}
+ 
++	int torrent::forget_pieces(std::vector<piece_index_t> const& pieces, int& busy)
++	{
++		TORRENT_ASSERT(is_single_thread());
++		busy = 0;
++		if (m_abort || !valid_metadata() || !has_picker()) return -1;
++		if (m_state == torrent_status::checking_files
++			|| m_state == torrent_status::checking_resume_data) return -1;
++
++		bool const was_finished = is_finished();
++		auto const queue = m_picker->get_download_queue();
++		int forgotten = 0;
++		for (piece_index_t const index : pieces)
++		{
++			if (index < piece_index_t(0) || index >= m_torrent_file->end_piece()) continue;
++			if (!m_picker->have_piece(index))
++			{
++				auto const it = std::find_if(queue.begin(), queue.end()
++					, [index](piece_picker::downloading_piece const& dp) { return dp.index == index; });
++				if (it == queue.end()) continue;
++				// restore_piece() with blocks still out would orphan the peers' download queues
++				if (it->requested > 0 || it->writing > 0 || it->hashing
++					|| it->passed_hash_check || it->locked)
++				{
++					++busy;
++					continue;
++				}
++				m_picker->restore_piece(index);
++				continue;
++			}
++			m_picker->we_dont_have(index);
++			inc_stats_counter(counters::num_have_pieces, -1);
++			++forgotten;
++			for (auto c : m_connections)
++			{
++				auto p = c->self();
++				if (p->is_disconnecting()) continue;
++				p->reject_piece(index);
++				p->write_dont_have(index);
++			}
++		}
++		if (forgotten > 0)
++		{
++			m_file_progress.clear();
++			m_file_progress.init(picker(), m_torrent_file->files());
++			set_need_save_resume(torrent_handle::if_download_progress);
++		}
++		update_gauge();
++		state_updated();
++		update_peer_interest(was_finished);
++		return forgotten;
++	}
++
+ 	// this is called when the piece hash is checked as correct. Note
+ 	// that the piece picker and the torrent won't necessarily consider
+ 	// us to have this piece yet, since it might not have been flushed

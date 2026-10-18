@@ -1283,6 +1283,22 @@ LT_API int lt_torrent_cancel_piece_requests(std::uint32_t id, std::int32_t piece
   return 0;
 }
 
+// Inline rather than posted, so the caller knows on return that the engine no longer claims these
+// pieces and may delete their bytes. Call it between ticks, never from inside a disk callback.
+LT_API int lt_torrent_forget_pieces(std::uint32_t id, std::int32_t const* pieces, std::uint32_t count,
+                                    std::int32_t* busy_out) {
+  if (!g_session || !pieces) return -1;
+  auto* h = lookup_handle(id);
+  if (!h || !h->is_valid()) return -1;
+  auto t = h->native_handle();
+  if (!t) return -1;
+  std::vector<lt::piece_index_t> list(pieces, pieces + count);
+  int busy = 0;
+  int const n = t->forget_pieces(list, busy);
+  if (busy_out) *busy_out = busy;
+  return n;
+}
+
 LT_API int lt_torrent_set_file_priority(std::uint32_t id, std::int32_t file, std::uint8_t prio) {
   if (!g_session) return -1;
   auto* h = lookup_handle(id);

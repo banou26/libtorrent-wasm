@@ -58,5 +58,6 @@ jobs:
       # byte-per-second ceiling for 36 seconds each and then assert on the throughput, so on a shared
       # runner they measure the machine as much as the engine: they pass here and failed on the first
       # CI run. Same call as video-interpolation-wasm's GPU suite and stub-plugin's live suite, both
-      # of which stay local for the same reason.
+      # of which stay local for the same reason. tests/forget-pieces-swarm.test.mjs stays local too:
+      # it needs transmission seeders, which this runner does not have.
       - run: npm run test:ci

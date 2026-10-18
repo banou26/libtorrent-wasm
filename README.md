@@ -117,6 +117,7 @@ discards partial blocks from peers that were merely slow.
 | `setPieceDeadline(handle, piece, ms, alertWhenAvailable?)` | One deadline. `ms` is relative to now. |
 | `resetPieceDeadline(handle, piece)` | Retire one deadline, leaving the rest. |
 | `cancelPieceRequests(handle, piece)` | Take a piece back from peers sitting on it. See below. |
+| `forgetPieces(handle, pieces)` | Stop claiming pieces whose bytes the storage drops (patch 0010). `{ forgotten, busy }`, or null for a seed or a check. |
 | `clearPieceDeadlines(handle)` | Retire all of them. Demotes to priority 1. |
 | `prioritizePieces(handle, prios)` | Positional map, one byte per piece from 0. |
 | `prioritizePieceList(handle, entries)` | Sparse update; other pieces keep what they have. |

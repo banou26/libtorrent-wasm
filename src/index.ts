@@ -542,6 +542,8 @@ export class Session {
   // handle -> piece -> how many in-flight read()s deadlined it, so an abandoned read only retires
   // the deadlines nothing else is still waiting on
   private deadlineRefs = new Map<number, Map<number, number>>()
+  // decoded by drainAlerts, handed out by the next popAlerts
+  private textAlerts: Alert[] = []
 
   // `listeners` and `portOpen` are never stored: reachable() derives them from the shim on every
   // read, because they are the two fields that go stale on their own
@@ -991,6 +993,43 @@ export class Session {
   }
 
   /**
+   * Stop claiming pieces whose bytes a storage is about to drop, without stopping the torrent.
+   *
+   * Each listed piece the engine holds becomes missing: queued upload requests for it are rejected
+   * and peers that speak BEP 54 (lt_donthave) are told. A partial piece with no block in flight
+   * loses its downloaded blocks. A partial piece with blocks requested, being written or being
+   * hashed is left alone and counted in `busy`; ask again later. Set the pieces to priority 0 first,
+   * or they simply download again.
+   *
+   * Synchronous: when it returns `busy: 0`, the engine neither holds nor is writing any listed piece,
+   * so their bytes may be deleted before the next tick. They also leave {@link bitfield} at once,
+   * rather than on the next state update. Save the resume data before deleting the bytes: a restart
+   * from the previous blob would claim the pieces again without checking them.
+   *
+   * Returns null, changing nothing, for a torrent that has every piece (a seed keeps no picker), one
+   * that is checking, or a handle the engine does not know yet.
+   */
+  forgetPieces(handle: number, pieces: Iterable<number>): { forgotten: number, busy: number } | null {
+    const list = [...pieces]
+    // a state update captured before the forget, decoded after it, would put the pieces back
+    this.drainAlerts()
+    const m = this.mod
+    const ptr = m._malloc(list.length * 4 + 4)
+    const busyPtr = ptr + list.length * 4
+    try {
+      for (let i = 0; i < list.length; i++) m.HEAP32[(ptr >> 2) + i] = list[i]! | 0
+      m.HEAP32[busyPtr >> 2] = 0
+      const forgotten = m._lt_torrent_forget_pieces(handle, ptr, list.length, busyPtr)
+      if (forgotten < 0) return null
+      const bf = this.bitfieldByHandle.get(handle)
+      if (bf) {
+        for (const p of list) if (p >= 0 && p < bf.numPieces) bf.pieces[p >> 3]! &= ~(0x80 >> (p & 7))
+      }
+      return { forgotten, busy: m.HEAP32[busyPtr >> 2]! }
+    } finally { m._free(ptr) }
+  }
+
+  /**
    * Positional priority map, one byte per piece from piece 0 (0=skip, 1=low, 4=default, 7=top).
    * A short array is padded out to the torrent's piece count from what this Session last wrote
    * (or the default 4), and a long one is truncated, so libtorrent always gets exactly one byte per
@@ -1202,13 +1241,20 @@ export class Session {
 
   // Eager - NOT a generator - so the cache updates always run even if the caller ignores the returned text alerts.
   popAlerts(): Alert[] {
+    this.drainAlerts()
+    const out = this.textAlerts
+    this.textAlerts = []
+    return out
+  }
+
+  private drainAlerts() {
     const m = this.mod
     m._lt_session_pump_alerts()
     const size = m._lt_alerts_size() >>> 0
-    if (!size) return []
+    if (!size) return
     const start = m._lt_alerts_data() >>> 0
     const view = new DataView(m.HEAPU8.buffer, start, size)
-    const out: Alert[] = []
+    const out = this.textAlerts
     let off = 0
     try {
       while (off + 8 <= size) {
@@ -1234,7 +1280,6 @@ export class Session {
       m._lt_alerts_clear()
       this.resolvePieceWaiters()
     }
-    return out
   }
 
   /**
