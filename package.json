@@ -1,6 +1,10 @@
 {
   "name": "libtorrent-wasm",
   "version": "0.3.21",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/banou26/libtorrent-wasm.git"
+  },
   "description": "libtorrent compiled to WebAssembly, single-threaded, transport over FKN WebVPN",
   "main": "build/index.js",
   "types": "build/index.d.ts",

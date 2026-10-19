@@ -1,0 +1,198 @@
+# Builds and tests libtorrent-wasm on every push and pull request, and publishes it to npmjs when its version changes,
+# with no npm token anywhere.
+#
+# THE FILENAME IS PART OF THE TRUST RELATIONSHIP AND MUST NOT CHANGE. npm trusted publishing binds the package to a
+# repository plus a workflow filename, and this file is the one registered on npmjs.com for banou26/libtorrent-wasm.
+# Renaming it, or the repository, stops every publish with an auth error that reads like a revoked credential.
+#
+# One workflow, so the engine is compiled once: the wasm the tests pass against is the artifact that gets published.
+name: Publish libtorrent-wasm
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # re-runs a publish that failed after the version already landed, which a push cannot repeat
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Every run compiles the engine from source before a single test can import it: the emsdk
+    # image, boost 1.84 headers, then ~160 translation units. 46s on a 16 core desktop.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `make dist` applies patches/*.patch onto the libtorrent submodule, so it has to be here.
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+        env:
+          # tests/ is node --test over loopback sockets and the wasm engine, never a browser.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
+      # `docker compose run` would build this on demand; doing it here keeps the image build
+      # (emsdk + boost headers staged into the sysroot) out of the compile step's log.
+      - run: docker compose build libtorrent-wasm
+
+      # dist/ and build/ are gitignored, so the engine every test imports has to be produced here.
+      - name: Compile the wasm engine
+        run: npm run make-docker 2>&1 | tee wasm-build.log
+
+      # The docker wrapper exits 0 even when ninja stops, so the log is the result and the exit
+      # code is not. Match `error:` with its colon: bare `error` hits the error_code.cpp.o line.
+      - name: Read the build log for failures
+        run: |
+          failures=$(grep -oE 'FAILED:|ninja: build stopped|CMake Error|error:|Error [0-9]+' wasm-build.log | wc -l)
+          echo "failure lines in log: $failures"
+          test "$failures" -eq 0
+          # A link that emitted nothing usable leaves every step above still looking healthy.
+          test -s dist/libtorrent.wasm
+          grep -q _lt_session_create dist/libtorrent.js
+
+      # `npm run build` minus the compile above, split so each step's own exit code gates the run
+      # (chained behind a pipe, a tsc failure would be swallowed).
+      - run: npm run vite-build
+      - run: npm run types
+      # Puts dist/libtorrent.{js,wasm} beside the bundle, where build/index.js imports them.
+      - run: npm run copy-wasm
+
+      # `npm test` minus tests/rate-limits.test.mjs. Those two cases hold a real transfer against a
+      # byte-per-second ceiling for 36 seconds each and then assert on the throughput, so on a shared
+      # runner they measure the machine as much as the engine: they pass here and failed on the first
+      # CI run. tests/forget-pieces-swarm.test.mjs stays local too: it needs transmission seeders,
+      # which this runner does not have.
+      - run: npm run test:ci
+
+      - name: Keep the tested artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: build
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [build]
+    # a pull request builds and tests, and publishes nothing
+    if: github.event_name != 'pull_request'
+    # npm refuses trusted publishing from a self-hosted runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # the OIDC token npm exchanges for short-lived publish credentials
+      id-token: write
+      # only to push the release tag
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # NO registry-url: it writes an .npmrc pinning auth to an empty ${NODE_AUTH_TOKEN}, npm then skips the OIDC
+      # exchange and the publish dies with an E404. No `cache` either: this job never installs.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Trusted publishing needs npm >= 11.5.1; an older one fails as an auth error rather than as a stale CLI.
+      - name: Use an npm that supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          echo "npm $(npm --version)"
+
+      # Compared against the REGISTRY rather than the previous commit, so a failed publish retries correctly and a
+      # re-run of a successful one is a no-op. "Not on the registry" and "the registry did not answer" are different.
+      - name: Decide whether the version moved
+        id: decide
+        run: |
+          LOCAL=$(node -p "require('./package.json').version")
+          echo "local=$LOCAL" >> "$GITHUB_OUTPUT"
+
+          set +e
+          PUBLISHED=$(cd "${RUNNER_TEMP:-/tmp}" && npm view libtorrent-wasm version 2>/tmp/npm-view.err)
+          VIEW_CODE=$?
+          set -e
+
+          if [ "$VIEW_CODE" -eq 0 ] && [ -n "$PUBLISHED" ]; then
+            :
+          elif grep -q 'E404' /tmp/npm-view.err; then
+            PUBLISHED=""
+          else
+            echo "::error::could not read libtorrent-wasm from the registry (exit $VIEW_CODE). Refusing to guess."
+            cat /tmp/npm-view.err
+            exit 1
+          fi
+
+          echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
+          if [ "$LOCAL" = "$PUBLISHED" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::libtorrent-wasm $LOCAL is already published; nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::publishing libtorrent-wasm ${PUBLISHED:-none} -> $LOCAL"
+          fi
+
+      - name: Take the tested build
+        if: steps.decide.outputs.changed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: build
+
+      - name: Verify the artifact before it leaves the runner
+        if: steps.decide.outputs.changed == 'true'
+        run: |
+          ls -la build
+          # shellcheck disable=SC2016 # the single-quoted script is JavaScript, its ${} are template literals
+          node -e '
+            const { strict: assert } = require("node:assert")
+            const { existsSync, readFileSync, statSync } = require("node:fs")
+            const manifest = require("./package.json")
+            assert.equal(manifest.name, "libtorrent-wasm")
+            assert.equal(manifest.version, process.env.LOCAL, "built version does not match package.json")
+
+            const entries = [manifest.main, manifest.types, ...Object.values(manifest.exports).flatMap(Object.values)]
+            for (const entry of entries) assert.ok(entry && existsSync(entry), `${entry} is named by package.json but was not built`)
+
+            // the engine is loaded at runtime by path, so no import graph would catch it missing or truncated
+            const { size } = statSync("build/libtorrent.wasm")
+            assert.ok(size > 2_000_000, `build/libtorrent.wasm is only ${size} bytes`)
+            assert.ok(readFileSync("build/libtorrent.js", "utf8").includes("_lt_session_create"), "build/libtorrent.js exports no session")
+
+            const deps = { ...manifest.dependencies, ...manifest.peerDependencies }
+            const local = Object.entries(deps).filter(([, range]) => /^(file:|link:|portal:)/.test(range))
+            assert.equal(local.length, 0, `a consumer could not install: ${local.map(([n, r]) => `${n}@${r}`).join(", ")}`)
+
+            // provenance names this repository, and the registry refuses (422, after signing) a manifest naming another
+            const expected = `https://github.com/${process.env.GITHUB_REPOSITORY}`
+            const declared = (manifest.repository?.url ?? manifest.repository ?? "").replace(/^git\+/, "").replace(/\.git$/, "")
+            assert.equal(declared, expected, `package.json repository is ${declared || "unset"}, and provenance will claim ${expected}`)
+            console.log(`artifact ok: ${manifest.name}@${manifest.version}`)
+          '
+        env:
+          LOCAL: ${{ steps.decide.outputs.local }}
+
+      # No credential is passed: npm exchanges the job's OIDC identity against the trusted publisher on npmjs.com for
+      # banou26/libtorrent-wasm + publish.yml. --ignore-scripts because `prepublishOnly` is `npm run build`, which
+      # would compile a second, untested engine in place of the one that just passed.
+      - name: Publish
+        if: steps.decide.outputs.changed == 'true'
+        run: npm publish --access public --ignore-scripts --loglevel verbose
+
+      - name: Tag the release
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.local }}
+        run: |
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
