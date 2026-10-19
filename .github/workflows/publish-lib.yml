@@ -183,7 +183,7 @@ jobs:
           LOCAL: ${{ steps.decide.outputs.local }}
 
       # No credential is passed: npm exchanges the job's OIDC identity against the trusted publisher on npmjs.com for
-      # banou26/libtorrent-wasm + publish.yml. --ignore-scripts because `prepublishOnly` is `npm run build`, which
+      # banou26/libtorrent-wasm + publish-lib.yml. --ignore-scripts because `prepublishOnly` is `npm run build`, which
       # would compile a second, untested engine in place of the one that just passed.
       - name: Publish
         if: steps.decide.outputs.changed == 'true'
