@@ -5,6 +5,11 @@ export interface SessionOptions {
   net: any
   /** @fkn/lib's dgram module (@fkn/lib/dgram) */
   dgram: any
+  /**
+   * Resolves the names the engine looks up (trackers, web seeds, the DHT's bootstrap nodes).
+   * Without one the engine asks 1.1.1.1 over HTTPS, from the page's own network.
+   */
+  dnsLookup?: FknHost['dnsLookup']
   /** Disk backend - defaults to a no-op (download but discard). Streaming
    *  `read()` requires a backend that can read back (e.g. OPFSStorage). */
   storage?: StorageBackend
@@ -1676,6 +1681,40 @@ async function reserve(
   return null
 }
 
+// WASI's ECONNREFUSED, the numbering the shim hands libtorrent (library_fkn.js, FKN.err)
+const ECONNREFUSED = 14
+
+/**
+ * A host that carries nothing, for a session with no relay behind it.
+ *
+ * `net` refuses every connect at once and its listener never accepts, `dgram` binds and drops what
+ * it is sent, and `dnsLookup` answers "no address" at once, so the engine's own lookup over HTTPS
+ * is never used either. Trackers and web seeds a torrent names therefore fail without a byte
+ * leaving. Pass `enableDht: false` and `reserveListenPort: false` beside it: there is nobody to
+ * bootstrap from, and a reservation would wait out its 8 s for a port that cannot exist.
+ *
+ * ```ts
+ * createSession({ ...offlineHost(), storage, enableDht: false, reserveListenPort: false })
+ * ```
+ */
+export function offlineHost(): { net: any, dgram: any, dnsLookup: NonNullable<FknHost['dnsLookup']> } {
+  const connect = () => {
+    let refuse: ((err: Error) => void) | undefined
+    // after the shim has attached its listeners, which it does once connect() has returned
+    queueMicrotask(() => refuse?.(Object.assign(new Error('offline host: connection refused'), { errno: ECONNREFUSED })))
+    return {
+      on(event: string, listener: (err: Error) => void) { if (event === 'error') refuse = listener },
+      write: () => true,
+      destroy() {},
+    }
+  }
+  return {
+    net: { connect, createServer: () => ({ on() {}, listen() {}, close() {} }) },
+    dgram: { createSocket: () => ({ on() {}, bind() {}, send() {}, close() {} }) },
+    dnsLookup: async () => undefined,
+  }
+}
+
 export async function createSession(options: SessionOptions): Promise<Session> {
   const factory = options.moduleFactory
     // @ts-ignore - generated sibling, resolved at runtime
@@ -1686,6 +1725,7 @@ export async function createSession(options: SessionOptions): Promise<Session> {
     dgram: options.dgram,
     storage: options.storage ?? null,
     debug: options.debug ?? false,
+    dnsLookup: options.dnsLookup,
   }
   // started before the module is awaited so the two relay round trips overlap the wasm load
   const reserving = options.reserveListenPort === false
