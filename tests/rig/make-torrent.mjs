@@ -10,7 +10,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const bencode = (v) => {
+export const bencode = (v) => {
   if (typeof v === 'number') {
     if (!Number.isInteger(v)) throw new Error(`bencode: non-integer ${v}`)
     return Buffer.from(`i${v}e`)
@@ -29,6 +29,34 @@ const bencode = (v) => {
     ])
   }
   throw new Error(`bencode: unsupported ${typeof v}`)
+}
+
+/** The inverse, with every string as a Buffer and every dictionary as a plain object. */
+export const bdecode = (buf) => {
+  let i = 0
+  const read = () => {
+    const c = buf[i]
+    if (c === 0x69) {
+      const end = buf.indexOf(0x65, i)
+      const n = Number(buf.subarray(i + 1, end).toString('latin1'))
+      i = end + 1
+      return n
+    }
+    if (c === 0x6c || c === 0x64) {
+      const out = c === 0x6c ? [] : {}
+      for (i++; buf[i] !== 0x65;) {
+        if (c === 0x6c) out.push(read())
+        else out[read().toString('latin1')] = read()
+      }
+      i++
+      return out
+    }
+    const colon = buf.indexOf(0x3a, i)
+    const start = colon + 1
+    i = start + Number(buf.subarray(i, colon).toString('latin1'))
+    return buf.subarray(start, i)
+  }
+  return read()
 }
 
 /**

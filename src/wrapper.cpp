@@ -294,9 +294,25 @@ void emit_read_piece(lt::read_piece_alert const* rpa) {
   put_record(REC_READ_PIECE, p);
 }
 
-void emit_resume_data(lt::save_resume_data_alert const* a) {
+// 100.64.0.0/10, the range Session.addPeerStream (src/index.ts) takes its made-up addresses from.
+// The same range is tested in src/library_fkn.js and src/index.ts.
+bool is_stream_address(lt::address const& a) {
+  return a.is_v4() && (a.to_v4().to_uint() & 0xFFC00000u) == 0x64400000u;
+}
+
+// A stream peer's address means nothing after its stream closes, and libtorrent saves every peer it
+// connected to. Loaded back, the stale entry is dialled and refused, which stamps it, and a new
+// stream given that address then waits out min_reconnect_time: measured 55.7 s against 0.2 s.
+void drop_stream_peers(lt::add_torrent_params& p) {
+  auto const stream = [](lt::tcp::endpoint const& ep) { return is_stream_address(ep.address()); };
+  p.peers.erase(std::remove_if(p.peers.begin(), p.peers.end(), stream), p.peers.end());
+  p.banned_peers.erase(std::remove_if(p.banned_peers.begin(), p.banned_peers.end(), stream), p.banned_peers.end());
+}
+
+void emit_resume_data(lt::save_resume_data_alert* a) {
   std::uint32_t const hid = handle_id_for_hash(a->params.info_hashes.get_best());
   if (hid == 0) return;
+  drop_stream_peers(a->params);
   std::vector<char> const buf = lt::write_resume_data_buf(a->params);
   std::vector<std::uint8_t> p;
   auto u32 = [&](std::uint32_t v){ auto* b = reinterpret_cast<std::uint8_t*>(&v); p.insert(p.end(), b, b + 4); };
@@ -923,6 +939,7 @@ LT_API int lt_session_add_torrent_with_resume(
   if (ec) return -2;
   if (save_path && *save_path) atp.save_path = save_path;
   atp.flags |= lt::torrent_flags::no_verify_files;
+  drop_stream_peers(atp);
   auto const hid = id_for_hash(atp.info_hashes.get_best());
   g_session->ses->async_add_torrent(std::move(atp));
   return static_cast<int>(hid);
