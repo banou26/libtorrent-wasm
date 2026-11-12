@@ -50,6 +50,7 @@ test('a udp socket dropped with error then close heals, and so does the listener
   healed(r)
   // select hands a listener with a pending error to accept() on every pass
   assert.equal(r.acceptEmpty, 0, `accept() was called ${r.acceptEmpty} times with nothing to accept`)
+  assert.ok(r.listening, 'the listener was never reopened')
 })
 
 test('a udp socket dropped with close alone heals', async () => {
@@ -66,4 +67,5 @@ test('a uTP dial waiting on a socket being replaced does not spin', async () => 
   // at least one send was turned away, or the dial never waited on the dead socket
   assert.ok(r.unsent >= 1 && r.unsent < 100, `${r.unsent} sends were turned away while the socket was gone`)
   healed(r)
+  assert.ok(r.dialed, 'the dial held back while the socket was gone never left the replacement socket')
 })

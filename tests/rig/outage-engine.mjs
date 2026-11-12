@@ -186,6 +186,9 @@ setInterval(() => {
     udpSockets: udpSockets.length,
     udpDead: !!udpFd()?.dead,
     healedAt,
+    // the dropped server is marked closed above, so any server listening now is its replacement
+    listening: servers.some((s) => s.bound && !s.closed),
+    dialed: !!live()?.sent.some((d) => `${d.address}:${d.port}` === scenario.dialWhileDead),
     statusUpdatesAfterOutage,
     probes: probes.map((p) => ({ ...p, answered: answered(p) })),
   })
