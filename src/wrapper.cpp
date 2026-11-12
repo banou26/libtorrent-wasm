@@ -42,6 +42,7 @@ extern "C" int __syscall_setsockopt(int /*fd*/, int /*level*/, int /*optname*/,
 // torrent.hpp only forward-declares peer_connection, and lt_torrent_cancel_piece_requests reaches
 // into each peer's download and request queues, so the definition has to come in explicitly
 #include "libtorrent/peer_connection.hpp"
+#include "libtorrent/torrent_peer.hpp"
 #include "libtorrent/piece_block.hpp"
 #include "libtorrent/piece_picker.hpp"
 #include "libtorrent/aux_/utp_stream.hpp"
@@ -1067,6 +1068,25 @@ LT_API int lt_torrent_set_flags(std::uint32_t id, std::uint32_t flags, std::uint
   if (!h || !h->is_valid()) return -1;
   h->set_flags(lt::torrent_flags_t(static_cast<std::uint64_t>(flags)),
                lt::torrent_flags_t(static_cast<std::uint64_t>(mask)));
+  return 0;
+}
+
+// Names a peer that Session.addPeerStream stands behind a made-up address (IPv4, host byte order),
+// so libtorrent dials it and the shim answers the dial with the stream. Not connect_peer: a new
+// torrent_peer assumes uTP (torrent_peer.cpp:182) and no flag clears that, so the TCP dial would
+// wait behind one uTP attempt. Measured from the call to the dial: 4.1 to 5.4 s through
+// connect_peer, 0.19 to 1.24 s with supports_utp cleared.
+LT_API int lt_torrent_add_channel_peer(std::uint32_t id, std::uint32_t ipv4, int port) {
+  if (!g_session) return -1;
+  auto* h = lookup_handle(id);
+  if (!h || !h->is_valid()) return -1;
+  auto t = h->native_handle();
+  if (!t) return -1;
+  lt::tcp::endpoint const ep(lt::address_v4(ipv4), static_cast<std::uint16_t>(port));
+  boost::asio::post(*g_session->ioc, [t, ep] {
+    lt::torrent_peer* p = t->add_peer(ep, lt::peer_info::tracker, lt::pex_flags_t{});
+    if (p) p->supports_utp = false;
+  });
   return 0;
 }
 

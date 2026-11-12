@@ -1,4 +1,6 @@
-import type { LtModuleFactory, LtModule, FknHost, PreboundSockets, StorageBackend } from './types'
+import type { LtModuleFactory, LtModule, FknHost, PeerStreamSocket, PreboundSockets, StorageBackend } from './types'
+
+export type { PeerStreamSocket } from './types'
 
 export interface SessionOptions {
   /** @fkn/lib's net module (@fkn/lib/net) */
@@ -382,8 +384,13 @@ export const PEER_SOURCE = {
 } as const
 
 export interface PeerInfo {
-  /** `address:port`, with an IPv6 address in brackets. */
+  /**
+   * `address:port`, with an IPv6 address in brackets. For a `webrtc` peer, whose address the engine
+   * made up, it is not an address: `webrtc:` and a number no other peer of the session has.
+   */
   endpoint: string
+  /** What carries the connection. `webrtc` is a peer handed over through {@link Session.addPeerStream}. */
+  transport: 'tcp' | 'utp' | 'webrtc'
   /** Whatever the remote client calls itself. Arbitrary text from the network: never trust it. */
   client: string
   /** libtorrent's peer_flags_t. Read it through {@link PEER_FLAG}. */
@@ -523,6 +530,21 @@ export interface ReadOptions {
   deadlineMs?: number | null
 }
 
+// 100.64.0.0/10 (shared address space, RFC 6598), where addPeerStream takes its addresses from.
+// libtorrent counts the range as local, so a remote ignores one as a vote on its own address and
+// patch 0011 keeps it out of peer exchange, yet it is not in the class libtorrent never chokes.
+// wrapper.cpp and library_fkn.js test the same range.
+const STREAM_ADDRESSES = 1 << 22
+const STREAM_PORT = 6881
+const STREAM_DIAL_TIMEOUT_MS = 10_000
+
+/** Where an `address` or `address:port` sits in the stream range, or -1 outside it. */
+const streamIndex = (endpoint: string): number => {
+  const m = /^100\.(\d+)\.(\d+)\.(\d+)(?::\d+)?$/.exec(endpoint)
+  if (!m || (+m[1]! & 0xc0) !== 0x40) return -1
+  return ((+m[1]! & 0x3f) << 16) | (+m[2]! << 8) | +m[3]!
+}
+
 const DEFAULT_READ_TIMEOUT_MS = 60_000
 const DEFAULT_WINDOW_PIECES = 12
 const DEFAULT_DEADLINE_STEP_MS = 1000
@@ -555,6 +577,10 @@ export class Session {
   private deadlineRefs = new Map<number, Map<number, number>>()
   // decoded by drainAlerts, handed out by the next popAlerts
   private textAlerts: Alert[] = []
+  // address -> the stream waiting for libtorrent to dial it
+  private streams = new Map<string, { socket: PeerStreamSocket, timer: ReturnType<typeof setTimeout> }>()
+  // a random start, so a session does not hand out the addresses the one before it did
+  private nextStream = Math.floor(Math.random() * STREAM_ADDRESSES)
 
   // `listeners` and `portOpen` are never stored: reachable() derives them from the shim on every
   // read, because they are the two fields that go stale on their own
@@ -578,6 +604,7 @@ export class Session {
     if (mod._lt_session_create() !== 0) {
       throw new Error('lt_session_create returned non-zero')
     }
+    if (mod.fkn) mod.fkn.takeStream = address => this.takeStream(address)
     const tickMs = options.tickIntervalMs ?? 250
     this.fallbackTimer = setInterval(() => this.tick(), tickMs) as unknown as number
   }
@@ -653,6 +680,55 @@ export class Session {
         if (i >= 0) { this.resumeWaiters.splice(i, 1); reject(new Error('save_resume_data timed out')) }
       }, timeoutMs)
     })
+  }
+
+  /**
+   * Give libtorrent an open byte stream to a remote peer of this torrent, whatever carries it.
+   *
+   * The stream gets an address of its own in 100.64.0.0/10, port 6881, and libtorrent is told to
+   * dial it. The dial never leaves the engine: the socket shim answers it with `socket`, usually
+   * within a second. Every stream is dialled, so the engine writes its handshake without waiting
+   * for the remote's, and two of these engines on one stream both do.
+   *
+   * `socket` is destroyed with an error when libtorrent has not dialled within 10 s (the torrent
+   * is paused or queued, the session is at its connection limit), and at once when the engine does
+   * not hold `handle` (removed, or added so recently that no tick has run since). So hand a stream
+   * over once it is open, for a torrent that is running.
+   *
+   * No address is given twice before all 4,194,304 have been used, and none is ever handed to the
+   * host's `net` or `dgram`, written to resume data, or sent in peer exchange. The peer list shows
+   * such a peer as `webrtc` ({@link PeerInfo.transport}).
+   */
+  addPeerStream(handle: number, socket: PeerStreamSocket): { address: string, port: number } {
+    const index = this.nextStream
+    this.nextStream = (index + 1) % STREAM_ADDRESSES
+    const address = `100.${64 + (index >> 16)}.${(index >> 8) & 0xff}.${index & 0xff}`
+    this.streams.set(address, {
+      socket,
+      timer: setTimeout(
+        () => this.dropStream(address, `libtorrent did not dial within ${STREAM_DIAL_TIMEOUT_MS} ms`),
+        STREAM_DIAL_TIMEOUT_MS,
+      ),
+    })
+    // the wrapper knows a handle only once its add alert has been pumped
+    this.drainAlerts()
+    if (this.mod._lt_torrent_add_channel_peer(handle, 0x64400000 + index, STREAM_PORT) !== 0) {
+      this.dropStream(address, `the engine has no torrent ${handle}`)
+    }
+    return { address, port: STREAM_PORT }
+  }
+
+  private takeStream(address: string): PeerStreamSocket | undefined {
+    const entry = this.streams.get(address)
+    if (!entry) return undefined
+    this.streams.delete(address)
+    clearTimeout(entry.timer)
+    return entry.socket
+  }
+
+  private dropStream(address: string, why: string) {
+    const socket = this.takeStream(address)
+    try { socket?.destroy(new Error(`addPeerStream: ${why}`)) } catch { /* the socket's own fault, and it is gone either way */ }
   }
 
   /**
@@ -1344,6 +1420,8 @@ export class Session {
   private observeReachability(message: string) {
     const incoming = INCOMING_RE.exec(message)
     if (incoming) {
+      // a stream address is not somebody who reached the announced port
+      if (streamIndex(incoming[1]!) >= 0) return
       const transport = incoming[2]!.toLowerCase()
       this.reachability.inbound++
       this.reachability.inboundByTransport[transport] = (this.reachability.inboundByTransport[transport] ?? 0) + 1
@@ -1397,8 +1475,11 @@ export class Session {
       const numPieces = view.getInt32(off, true); off += 4
       const requestsInFlight = view.getInt32(off, true); off += 4
       const failCount = view.getInt32(off, true); off += 4
+      const stream = streamIndex(endpoint)
       peers.push({
-        endpoint, client, flags, source, connectionType,
+        endpoint: stream < 0 ? endpoint : `webrtc:${stream}`,
+        transport: stream >= 0 ? 'webrtc' : flags & PEER_FLAG.utpSocket ? 'utp' : 'tcp',
+        client, flags, source, connectionType,
         downloadRate, uploadRate, payloadDownloadRate, payloadUploadRate,
         totalDownload, totalUpload, progress, rtt, numPieces, requestsInFlight, failCount,
       })
@@ -1565,6 +1646,7 @@ export class Session {
     this.resumeWaiters = []
     this.deadlineRefs.clear()
     this.priosByHandle.clear()
+    for (const address of [...this.streams.keys()]) this.dropStream(address, 'the session was destroyed')
     this.mod._lt_session_destroy()
     // After the session is gone, because closing the tick channel first would strand any work
     // _lt_session_destroy still wants to schedule. The shim publishes itself as Module.__FKN
@@ -1685,7 +1767,8 @@ async function reserve(
 const ECONNREFUSED = 14
 
 /**
- * A host that carries nothing, for a session with no relay behind it.
+ * A host that carries nothing, for a session with no relay behind it, whose peers all come from
+ * {@link Session.addPeerStream}.
  *
  * `net` refuses every connect at once and its listener never accepts, `dgram` binds and drops what
  * it is sent, and `dnsLookup` answers "no address" at once, so the engine's own lookup over HTTPS

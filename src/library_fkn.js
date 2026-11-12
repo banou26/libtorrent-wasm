@@ -406,6 +406,39 @@ addToLibrary({
       }, delay)
     },
 
+    // 100.64.0.0/10, where Session.addPeerStream (src/index.ts) takes its made-up addresses from.
+    // Nothing on any network stands behind one, so the host's net and dgram are never given one.
+    isStreamAddress(ep) {
+      if (ep.family !== 'IPv4') return false
+      const parts = ep.address.split('.')
+      return parts[0] === '100' && (parts[1] & 0xc0) === 0x40
+    },
+
+    // the one place a datagram leaves: sendto, and sendmsg with several buffers
+    sendUdp(st, addrPtr, addrLen, len, read) {
+      const ep = addrPtr
+        ? FKN.readSockaddr(addrPtr, addrLen)
+        : (st.remoteAddr
+            ? { address: st.remoteAddr, port: st.remotePort, family: st.remoteFamily }
+            : null)
+      if (!ep) return -FKN.err.INVAL
+      // dropped, and reported as sent
+      if (FKN.isStreamAddress(ep)) return len
+      // EAGAIN is the honest answer while the socket is being replaced; reporting a send as delivered over a socket that is gone makes the loss invisible
+      if (st.dead || !st.socket) {
+        FKN.reopenUdp(st, 'send-on-dead')
+        return -FKN.err.AGAIN
+      }
+      try {
+        st.socket.send(read(), 0, len, ep.port, ep.address)
+      } catch (e) {
+        FKN.reopenUdp(st, 'send-threw')
+        return -FKN.err.AGAIN
+      }
+      FKN.stats.udpTx += len
+      return len
+    },
+
     init() {
       if (FKN.initialized) return
       const host = Module.fkn
@@ -543,17 +576,27 @@ addToLibrary({
     }
     if (st.kind !== 'tcp-unbound') return -FKN.err.INVAL
 
-    const sock = FKN.net.connect({ host: ep.address, port: ep.port })
+    // A dial to a stream address is answered with the stream the session holds for it, or refused
+    // here: libtorrent redials a peer whose stream is gone, and that dial has nowhere to go.
+    const stream = FKN.isStreamAddress(ep)
+    const sock = stream
+      ? FKN.host.takeStream && FKN.host.takeStream(ep.address)
+      : FKN.net.connect({ host: ep.address, port: ep.port })
+    if (!sock) return -FKN.err.CONNREFUSED
     st.kind = 'tcp'
     st.socket = sock
-    st.connecting = true
+    // a stream is open before it is dialled, so it has no 'connect' to wait for, and it keeps the
+    // local endpoint bind() gave the fd
+    st.connecting = !stream
+    st.connected = stream
     st.remoteAddr = ep.address
     st.remotePort = ep.port
     st.remoteFamily = ep.family
     st.diag.connectAt = Date.now()
     st.diag.nonblockAtConnect = st.nonblock
 
-    sock.on('connect', () => {
+    if (stream) FKN.scheduleTick()
+    else sock.on('connect', () => {
       st.connecting = false
       st.connected = true
       st.diag.connectedAt = Date.now()
@@ -797,26 +840,7 @@ addToLibrary({
     FKN.stats.sendto++
     const st = FKN.fds.get(fd)
     if (!st || st.kind !== 'udp') return -FKN.err.BADF
-    const ep = addrPtr
-      ? FKN.readSockaddr(addrPtr, addrLen)
-      : (st.remoteAddr
-          ? { address: st.remoteAddr, port: st.remotePort, family: st.remoteFamily }
-          : null)
-    if (!ep) return -FKN.err.INVAL
-    // EAGAIN is the honest answer while the socket is being replaced; reporting a send as delivered over a socket that is gone makes the loss invisible
-    if (st.dead || !st.socket) {
-      FKN.reopenUdp(st, 'send-on-dead')
-      return -FKN.err.AGAIN
-    }
-    const chunk = HEAPU8.slice(bufPtr, bufPtr + len)
-    try {
-      st.socket.send(chunk, 0, len, ep.port, ep.address)
-    } catch (e) {
-      FKN.reopenUdp(st, 'send-threw')
-      return -FKN.err.AGAIN
-    }
-    FKN.stats.udpTx += len
-    return len
+    return FKN.sendUdp(st, addrPtr, addrLen, len, () => HEAPU8.slice(bufPtr, bufPtr + len))
   },
 
   $FKN_close__deps: ['$FKN'],
@@ -1166,15 +1190,7 @@ addToLibrary({
     }
     if (st.kind === 'udp') {
       FKN.stats.sendto++
-      const ep = namePtr
-        ? FKN.readSockaddr(namePtr, nameLen)
-        : (st.remoteAddr
-            ? { address: st.remoteAddr, port: st.remotePort, family: st.remoteFamily }
-            : null)
-      if (!ep) return -FKN.err.INVAL
-      st.socket.send(merged, 0, total, ep.port, ep.address)
-      FKN.stats.udpTx += total
-      return total
+      return FKN.sendUdp(st, namePtr, nameLen, total, () => merged)
     }
     FKN.stats.send++
     if (st.diag) st.diag.sendCalls++

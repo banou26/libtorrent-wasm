@@ -1,5 +1,6 @@
 // A peer that dials the engine and speaks the wire protocol by hand, with the fast extension
-// (BEP 6) and lt_donthave (BEP 54), so a test sees every message the engine sends it.
+// (BEP 6) and lt_donthave (BEP 54), so a test sees every message the engine sends it. Given a
+// `socket` (one end of a stream the engine holds the other end of) it speaks over that instead.
 
 import crypto from 'node:crypto'
 import net from 'node:net'
@@ -42,26 +43,30 @@ export class ScriptedPeer {
   #socket = null
   #serve
 
-  constructor({ infoHash, port, serve = null }) {
+  constructor({ infoHash, port, serve = null, socket = null }) {
     this.infoHash = Buffer.from(infoHash, 'hex')
     this.port = port
     this.#serve = serve
+    this.#socket = socket
   }
 
   /** Resolves once the engine's handshake is back and this peer's opening messages are sent. */
   connect() {
     return new Promise((resolve, reject) => {
-      const socket = net.createConnection({ host: '127.0.0.1', port: this.port })
+      const given = this.#socket
+      const socket = given ?? net.createConnection({ host: '127.0.0.1', port: this.port })
       this.#socket = socket
       socket.on('error', reject)
-      socket.on('connect', () => socket.write(Buffer.concat([
+      const open = () => socket.write(Buffer.concat([
         Buffer.from([PROTOCOL.length]),
         Buffer.from(PROTOCOL, 'ascii'),
         // extension protocol (BEP 10) and fast extension (BEP 6)
         Buffer.from([0, 0, 0, 0, 0, 0x10, 0, 0x04]),
         this.infoHash,
         Buffer.concat([Buffer.from('-SP0001-'), crypto.randomBytes(12)]),
-      ])))
+      ]))
+      if (given) open()
+      else socket.on('connect', open)
       let buf = Buffer.alloc(0)
       let shookHands = false
       socket.on('data', (chunk) => {

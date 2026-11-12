@@ -1,4 +1,7 @@
 export interface LtModule {
+  /** The host object the module was created with. Absent on a stub module. */
+  fkn?: FknHost
+
   HEAPU8: Uint8Array
   HEAP32: Int32Array
   HEAPU32: Uint32Array
@@ -43,6 +46,7 @@ export interface LtModule {
 
   _lt_torrent_set_sequential(handle: number, on: number): number
   _lt_torrent_set_flags(handle: number, flags: number, mask: number): number
+  _lt_torrent_add_channel_peer(handle: number, ipv4: number, port: number): number
   _lt_torrent_force_reannounce(handle: number): number
   _lt_torrent_queue_position(handle: number, where: number): number
   _lt_torrent_set_upload_limit(handle: number, bytesPerSecond: number): number
@@ -83,11 +87,43 @@ export interface PreboundSockets {
   udpTaken?: boolean
 }
 
+/**
+ * One open byte stream to a remote peer, as `Session.addPeerStream` takes it: the shape the socket
+ * shim expects of a host socket, for a transport the engine does not open itself (a WebRTC data
+ * channel, for one).
+ *
+ * The engine attaches its listeners when libtorrent dials, up to 10 s after `addPeerStream`, and
+ * never removes them. Bytes that arrive before a `data` listener is attached must be held and
+ * delivered in order once it is: the remote's handshake is usually among them.
+ *
+ * Events, through `on`: `data` (a `Uint8Array` or `ArrayBuffer`, copied by the engine before the
+ * listener returns), `end` or `close` (the remote is gone), and `error` (an `Error`; libtorrent
+ * reads a reset).
+ */
+export interface PeerStreamSocket {
+  on(event: 'data' | 'end' | 'close' | 'error', listener: (arg?: any) => void): unknown
+  /**
+   * Send `chunk`, which the socket now owns. One call carries up to about 512 KiB, so a transport
+   * with a message limit slices it. The answer is not read.
+   */
+  write(chunk: Uint8Array): boolean
+  /**
+   * Close the stream and whatever carries it. The engine calls it when libtorrent drops the peer,
+   * and with an `Error` when it was never dialled. It can be called more than once.
+   */
+  destroy(error?: Error): void
+}
+
 export interface FknHost {
   net: any
   dgram: any
   storage: StorageBackend | null
   prebound?: PreboundSockets | null
+  /**
+   * Set by the Session. The shim asks it at every connect to an address in 100.64.0.0/10: the
+   * stream `addPeerStream` registered for that address, handed over once, or undefined.
+   */
+  takeStream?: (address: string) => PeerStreamSocket | undefined
   /** Turn on the transport and tick traces. Off by default: they run to hundreds of
    *  lines a minute on an ordinary download. */
   debug?: boolean
