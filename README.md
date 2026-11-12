@@ -145,6 +145,67 @@ watched file needs is ever skipped. Skipping files shrinks `totalWanted`, so
 `progress` and the finished state then describe the selection rather than the
 whole torrent, and the selection is persisted into resume data.
 
+## Peer streams
+
+`session.addPeerStream(handle, socket)` makes a peer out of a byte stream the
+caller opened, for a transport libtorrent does not have (a WebRTC data channel,
+for one):
+
+```js
+const { address, port } = session.addPeerStream(handle, socket)
+```
+
+The stream gets an address of its own in `100.64.0.0/10`, port 6881. libtorrent
+is told to dial it, and the socket shim answers that dial with `socket`, within
+about a second. `socket` has the shape of a host socket (`PeerStreamSocket`):
+
+| Member | Contract |
+| --- | --- |
+| `on('data' \| 'end' \| 'close' \| 'error' \| 'drain', fn)` | The engine attaches its listeners when libtorrent dials. Bytes that arrive before then are held and delivered in order. |
+| `write(chunk)` | One call carries up to about 512 KiB, so a transport with a message limit slices it. |
+| `destroy(error?)` | Called when libtorrent drops the peer, when the stream was never dialled, and when `maxRecvQueue` is passed. |
+| `backpressure` | Set it `true` and answer `false` from `write()` to hold the engine back until `drain`. Unset, every write is taken. |
+| `maxRecvQueue` | Unread bytes past which the stream is destroyed. Leave it unset: it becomes 96 MiB, above the 78 MiB of blocks the engine may have asked one peer for. |
+
+What it promises:
+
+- The address stays inside the engine. A connect or a datagram to the range
+  never reaches `net` or `dgram` (a dial with no stream behind it is refused in
+  memory), resume data is written and loaded without it, and peer exchange does
+  not send it (patch 0011).
+- No address is given twice before all 4,194,304 have been used.
+- The peer list shows the peer with `transport: 'webrtc'` and an `endpoint`
+  that is not an address, and `reachable().inbound` never counts it.
+
+What it refuses:
+
+- A stream libtorrent has not dialled within 10 s (the torrent is paused or
+  queued, the session is at its connection limit) is destroyed with an error,
+  and so is one for a torrent the engine does not hold, at once. Hand a stream
+  over once it is open, for a torrent that is running.
+- It does no signalling. Finding the remote, opening the stream and opening
+  another after it closes are the caller's.
+
+### A session with no relay
+
+`offlineHost()` returns a `net`, a `dgram` and a `dnsLookup` that carry nothing:
+connects are refused at once, datagrams are dropped, and no name gets an
+address. A session on it reaches only the peers handed to `addPeerStream`:
+
+```js
+const session = await createSession({
+  ...offlineHost(), storage, enableDht: false, reserveListenPort: false,
+})
+```
+
+It is the ordinary engine otherwise, so the trackers and web seeds a torrent
+names are still tried, and fail without a byte leaving. Pass both flags: there
+is nobody to bootstrap the DHT from, and a port reservation would wait 8 s for a
+port that cannot exist.
+
+`dnsLookup` is an option of `createSession` on its own too. Without one the
+engine resolves names over HTTPS at 1.1.1.1, from the page's own network.
+
 ## Building
 
 The full build runs inside Docker so the host needs nothing but Docker +
@@ -173,7 +234,20 @@ npm run dev    # vite dev server on :4560
 ## Patches
 
 `patches/*.patch` carry the WASM-specific edits on top of pinned upstream
-libtorrent: uTP LEDBAT bypass, WASI errno values, FIONREAD tolerance, etc.
-They're applied via `git apply` at build time (`make apply-patches`). To
-rebase against a newer upstream, bump the submodule and rerun `make
-apply-patches`; rejected hunks must be reconciled manually.
+libtorrent. They're applied via `git apply` at build time (`make
+apply-patches`). To rebase against a newer upstream, bump the submodule and
+rerun `make apply-patches`; rejected hunks must be reconciled manually.
+
+| Patch | What it changes |
+| --- | --- |
+| 0001 | The port itself: name lookups go to JS instead of a resolver thread, and there are no interfaces or routes to enumerate. |
+| 0002 | The UDP read loop ends on the shim's "queue empty" instead of wedging the tick. |
+| 0003 | WASI errno values (`EINPROGRESS` 26, `EAGAIN` 6) instead of Linux's. |
+| 0004 | The minimum peer `request_timeout` is 30 s, so a fast peer is not snubbed by a stalled tick. |
+| 0005 | TCP peers are no longer dropped when `m_socket.available()` is unsupported. |
+| 0006 | The echoed uTP `timestamp_difference` is clamped to 1 us, which bypasses the peer's LEDBAT. |
+| 0007 | The UDP drain takes WASI's `EAGAIN` for "queue empty" too, so the read is armed again. |
+| 0008 | The uTP receive buffer capacity is a session-wide runtime setting. |
+| 0009 | A late time-critical piece is rescued before the first one completes. |
+| 0010 | `forget_pieces`, for a streaming storage that dropped a piece's bytes. |
+| 0011 | Peer exchange does not send local addresses, which mean nothing to a peer outside that network. That covers the addresses `addPeerStream` makes up. |

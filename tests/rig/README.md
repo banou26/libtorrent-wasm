@@ -47,7 +47,11 @@ nix build --no-link --print-out-paths 'nixpkgs#transmission_4'
 | `make-torrent.mjs` | bencode + trackerless torrent, no external tool |
 | `seeders.mjs` | a fleet of real transmission daemons |
 | `bad-peer.mjs` | a peer that claims pieces and does not deliver them |
-| `scripted-peer.mjs` | a peer that dials the engine, seed or leech, and records what it is sent |
+| `scripted-peer.mjs` | a peer that dials the engine, seed or leech, and records what it is sent; given a `socket` it speaks over that instead |
+| `stream-pipe.mjs` | an in-memory byte stream with two ends, each the socket `Session.addPeerStream` takes; optional pacing and backpressure |
+| `stream-engine.mjs` | what the peer stream tests share: an engine on `offlineHost()` with its pump, a fixture, a seeder, one ordered teardown |
+| `counting-host.mjs` | node's sockets with every connect and datagram recorded, and nothing allowed off this machine |
+| `offline-engine.mjs` | the engine in a worker thread on `offlineHost()`, reporting what it asked of the host |
 
 ## What it does not answer
 
