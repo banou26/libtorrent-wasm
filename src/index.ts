@@ -537,6 +537,9 @@ export interface ReadOptions {
 const STREAM_ADDRESSES = 1 << 22
 const STREAM_PORT = 6881
 const STREAM_DIAL_TIMEOUT_MS = 10_000
+// max_out_request_queue (wrapper.cpp) is 5000 blocks of 16 KiB, 78 MiB, and a stream cannot pause
+// its sender, so all of it can sit unread while the disk is behind
+const STREAM_MAX_RECV_QUEUE = 96 * 1024 * 1024
 
 /** Where an `address` or `address:port` sits in the stream range, or -1 outside it. */
 const streamIndex = (endpoint: string): number => {
@@ -703,6 +706,7 @@ export class Session {
     const index = this.nextStream
     this.nextStream = (index + 1) % STREAM_ADDRESSES
     const address = `100.${64 + (index >> 16)}.${(index >> 8) & 0xff}.${index & 0xff}`
+    socket.maxRecvQueue ??= STREAM_MAX_RECV_QUEUE
     this.streams.set(address, {
       socket,
       timer: setTimeout(

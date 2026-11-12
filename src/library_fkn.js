@@ -414,6 +414,63 @@ addToLibrary({
       return parts[0] === '100' && (parts[1] & 0xc0) === 0x40
     },
 
+    /**
+     * Queue what a connected socket delivers, for a dialled socket and an accepted one alike.
+     *
+     * A socket may set `maxRecvQueue`: once its unread bytes pass it the socket is destroyed, and
+     * libtorrent reads a reset and asks other peers for what this one owed. It is the only bound
+     * there is for a stream that cannot pause its sender. No relay socket sets it.
+     */
+    wireTcp(st, sock) {
+      sock.on('data', (chunk) => {
+        if (st.diag) st.diag.dataChunks++
+        // CRITICAL: copy the chunk - @fkn/lib's TCP stream re-uses backing buffers across reads, and stashing the original surfaces as hash-piece-failed alerts and instant peer bans
+        const src = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
+        const copy = new Uint8Array(src.length)
+        copy.set(src)
+        st.recv.chunks.push(copy)
+        st.recv.total += copy.length
+        if (st.recv.total > sock.maxRecvQueue) {
+          st.recv.chunks = []
+          st.recv.total = 0
+          st.error = st.recv.error = FKN.err.CONNRESET
+          try { sock.destroy(new Error('unread bytes passed maxRecvQueue')) } catch (e) {}
+        }
+        FKN.scheduleTick()
+      })
+      sock.on('end', () => { st.recv.fin = true; FKN.scheduleTick() })
+      sock.on('close', () => { st.recv.fin = true; FKN.scheduleTick() })
+      sock.on('error', (err) => {
+        st.error = err.errno || FKN.err.CONNRESET
+        st.recv.error = st.error
+        FKN.scheduleTick()
+      })
+      if (sock.backpressure === true) sock.on('drain', () => { st.sendBlocked = false; FKN.scheduleTick() })
+    },
+
+    /**
+     * The one place a tcp socket is written: send, and sendmsg with several buffers. `read` copies
+     * the bytes out of the heap, and is not called while the socket is held back.
+     *
+     * A socket with `backpressure === true` is held back after a write() that answered false, until
+     * its 'drain': send answers EAGAIN and the fd is not reported writable meanwhile (reported
+     * writable, a tick would retry the send without end). Every other socket is written to
+     * whatever write() answers.
+     */
+    writeTcp(st, len, read) {
+      if (st.sendBlocked) return -FKN.err.AGAIN
+      if (!st.socket.write(read())) {
+        FKN.stats._writeBackpressure = (FKN.stats._writeBackpressure || 0) + 1
+        if (st.socket.backpressure === true) st.sendBlocked = true
+      }
+      FKN.stats.tcpTx += len
+      if (st.diag) {
+        st.diag.tcpTxBytes = (st.diag.tcpTxBytes || 0) + len
+        st.diag.firstSendLen = st.diag.firstSendLen ?? len
+      }
+      return len
+    },
+
     // the one place a datagram leaves: sendto, and sendmsg with several buffers
     sendUdp(st, addrPtr, addrLen, len, read) {
       const ep = addrPtr
@@ -607,23 +664,7 @@ addToLibrary({
       } catch (e) {}
       FKN.scheduleTick()
     })
-    sock.on('data', (chunk) => {
-      st.diag.dataChunks++
-      // CRITICAL: copy the chunk - @fkn/lib's TCP stream re-uses backing buffers across reads, and stashing the original surfaces as hash-piece-failed alerts and instant peer bans
-      const src = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
-      const copy = new Uint8Array(src.length)
-      copy.set(src)
-      st.recv.chunks.push(copy)
-      st.recv.total += copy.length
-      FKN.scheduleTick()
-    })
-    sock.on('end', () => { st.recv.fin = true; FKN.scheduleTick() })
-    sock.on('close', () => { st.recv.fin = true; FKN.scheduleTick() })
-    sock.on('error', (err) => {
-      st.error = err.errno || FKN.err.CONNRESET
-      st.recv.error = st.error
-      FKN.scheduleTick()
-    })
+    FKN.wireTcp(st, sock)
 
     return st.nonblock ? -FKN.err.INPROGRESS : 0
   },
@@ -732,21 +773,7 @@ addToLibrary({
       ...endpoints,
     }
     const newFd = FKN.newFd(newSt)
-    sock.on('data', (chunk) => {
-      // CRITICAL: copy the chunk - @fkn/lib's TCP stream re-uses backing buffers across reads, and stashing the original surfaces as hash-piece-failed alerts and instant peer bans
-      const src = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
-      const copy = new Uint8Array(src.length)
-      copy.set(src)
-      newSt.recv.chunks.push(copy)
-      newSt.recv.total += copy.length
-      FKN.scheduleTick()
-    })
-    sock.on('end', () => { newSt.recv.fin = true; FKN.scheduleTick() })
-    sock.on('close', () => { newSt.recv.fin = true; FKN.scheduleTick() })
-    sock.on('error', (err) => {
-      newSt.error = err.errno || FKN.err.CONNRESET; newSt.recv.error = newSt.error
-      FKN.scheduleTick()
-    })
+    FKN.wireTcp(newSt, sock)
     if (addrPtr && newSt.remoteAddr) {
       FKN.writeSockaddr(addrPtr, addrLenPtr, {
         family: newSt.remoteFamily, address: newSt.remoteAddr, port: newSt.remotePort,
@@ -824,15 +851,7 @@ addToLibrary({
       FKN.stats._sendNotConn = (FKN.stats._sendNotConn || 0) + 1
       return -FKN.err.NOTCONN
     }
-    const chunk = HEAPU8.slice(bufPtr, bufPtr + len)
-    const ok = st.socket.write(chunk)
-    if (!ok) FKN.stats._writeBackpressure = (FKN.stats._writeBackpressure || 0) + 1
-    FKN.stats.tcpTx += len
-    if (st.diag) {
-      st.diag.tcpTxBytes = (st.diag.tcpTxBytes || 0) + len
-      st.diag.firstSendLen = st.diag.firstSendLen ?? len
-    }
-    return len
+    return FKN.writeTcp(st, len, () => HEAPU8.slice(bufPtr, bufPtr + len))
   },
 
   $FKN_sendto__deps: ['$FKN'],
@@ -935,7 +954,7 @@ addToLibrary({
           (st.kind === 'tcp-listen' && st.acceptQueue.length > 0)
         )) revents |= 1
         if ((events & 4) && (
-          (st.kind === 'tcp' && st.connected) ||
+          (st.kind === 'tcp' && st.connected && !st.sendBlocked) ||
           (st.kind === 'udp' && !st.dead)
         )) revents |= 4
         if (st.error) revents |= 8
@@ -1182,26 +1201,23 @@ addToLibrary({
       iovs.push({ base, len })
       total += len
     }
-    const merged = new Uint8Array(total)
-    let mOff = 0
-    for (const { base, len } of iovs) {
-      merged.set(HEAPU8.subarray(base, base + len), mOff)
-      mOff += len
+    const merge = () => {
+      const merged = new Uint8Array(total)
+      let mOff = 0
+      for (const { base, len } of iovs) {
+        merged.set(HEAPU8.subarray(base, base + len), mOff)
+        mOff += len
+      }
+      return merged
     }
     if (st.kind === 'udp') {
       FKN.stats.sendto++
-      return FKN.sendUdp(st, namePtr, nameLen, total, () => merged)
+      return FKN.sendUdp(st, namePtr, nameLen, total, merge)
     }
     FKN.stats.send++
     if (st.diag) st.diag.sendCalls++
     if (!st.socket) return -FKN.err.NOTCONN
-    st.socket.write(merged)
-    FKN.stats.tcpTx += total
-    if (st.diag) {
-      st.diag.tcpTxBytes = (st.diag.tcpTxBytes || 0) + total
-      st.diag.firstSendLen = st.diag.firstSendLen ?? total
-    }
-    return total
+    return FKN.writeTcp(st, total, merge)
   },
 
   __syscall_sendto__deps: ['$FKN', '$FKN_send', '$FKN_sendto'],
@@ -1272,7 +1288,7 @@ addToLibrary({
     // waits for writable before uTP sends again: reported writable, one tick made 3.1 million sendto
     // calls in 4 s. reopenUdp schedules a tick once the socket is back.
     const writable = (st) => st && (
-      (st.kind === 'tcp' && st.connected) ||
+      (st.kind === 'tcp' && st.connected && !st.sendBlocked) ||
       (st.kind === 'udp' && !st.dead)
     )
     let total = 0

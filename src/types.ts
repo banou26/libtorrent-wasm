@@ -97,21 +97,35 @@ export interface PreboundSockets {
  * delivered in order once it is: the remote's handshake is usually among them.
  *
  * Events, through `on`: `data` (a `Uint8Array` or `ArrayBuffer`, copied by the engine before the
- * listener returns), `end` or `close` (the remote is gone), and `error` (an `Error`; libtorrent
- * reads a reset).
+ * listener returns), `end` or `close` (the remote is gone), `error` (an `Error`; libtorrent reads a
+ * reset), and `drain` (see `backpressure`).
  */
 export interface PeerStreamSocket {
-  on(event: 'data' | 'end' | 'close' | 'error', listener: (arg?: any) => void): unknown
+  on(event: 'data' | 'drain' | 'end' | 'close' | 'error', listener: (arg?: any) => void): unknown
   /**
    * Send `chunk`, which the socket now owns. One call carries up to about 512 KiB, so a transport
-   * with a message limit slices it. The answer is not read.
+   * with a message limit slices it. The answer is read only with `backpressure`.
    */
   write(chunk: Uint8Array): boolean
   /**
    * Close the stream and whatever carries it. The engine calls it when libtorrent drops the peer,
-   * and with an `Error` when it was never dialled. It can be called more than once.
+   * when it was never dialled, and when `maxRecvQueue` is passed, with an `Error` in the last two
+   * cases. It can be called more than once.
    */
   destroy(error?: Error): void
+  /**
+   * Set true by a socket that can say when to stop: after a `write()` that answered false the
+   * engine writes nothing more until the socket emits `drain`. Left unset, every write is taken
+   * whatever it answers, so the socket queues without bound behind a slow remote.
+   */
+  backpressure?: boolean
+  /**
+   * The unread bytes past which the engine destroys the stream, for a transport that cannot pause
+   * its sender. `addPeerStream` sets it to 96 MiB when the socket does not: the 78 MiB of blocks
+   * the engine may have asked one peer for, and room for the messages around them. A lower value
+   * closes a fast peer that did nothing wrong.
+   */
+  maxRecvQueue?: number
 }
 
 export interface FknHost {
