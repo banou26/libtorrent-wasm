@@ -10,8 +10,9 @@ import { PROTOCOL } from './peer-handshake.mjs'
 const MSG = {
   unchoke: 1, interested: 2, request: 6, piece: 7, haveAll: 14, haveNone: 15, reject: 16, extended: 20,
 }
-// the id this peer asks the engine to use for lt_donthave messages sent to it
+// the ids this peer asks the engine to use for the lt_donthave and ut_pex messages it sends
 const DONT_HAVE_ID = 7
+const PEX_ID = 8
 
 const frame = (id, payload = Buffer.alloc(0)) => {
   const b = Buffer.allocUnsafe(5 + payload.length)
@@ -40,6 +41,8 @@ export class ScriptedPeer {
   rejects = []
   /** Pieces the engine withdrew through lt_donthave. */
   dontHave = []
+  /** The bencoded payload of every ut_pex message the engine sent. */
+  pex = []
   #socket = null
   #serve
 
@@ -76,7 +79,7 @@ export class ScriptedPeer {
           buf = buf.subarray(68)
           shookHands = true
           socket.write(frame(MSG.extended, Buffer.concat([
-            Buffer.from([0]), Buffer.from(`d1:md11:lt_donthavei${DONT_HAVE_ID}eee`),
+            Buffer.from([0]), Buffer.from(`d1:md11:lt_donthavei${DONT_HAVE_ID}e6:ut_pexi${PEX_ID}eee`),
           ])))
           if (this.#serve) socket.write(Buffer.concat([frame(MSG.haveAll), frame(MSG.unchoke)]))
           else socket.write(Buffer.concat([frame(MSG.haveNone), frame(MSG.interested)]))
@@ -112,6 +115,8 @@ export class ScriptedPeer {
       this.rejects.push({ piece: payload.readUInt32BE(0), offset: payload.readUInt32BE(4), length: payload.readUInt32BE(8) })
     } else if (id === MSG.extended && payload[0] === DONT_HAVE_ID) {
       this.dontHave.push(payload.readUInt32BE(1))
+    } else if (id === MSG.extended && payload[0] === PEX_ID) {
+      this.pex.push(Buffer.from(payload.subarray(1)))
     } else if (id === MSG.request && this.#serve) {
       const piece = payload.readUInt32BE(0)
       const offset = payload.readUInt32BE(4)

@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Banou <me@banou.dev>
+Date: Fri, 13 Nov 2026 06:00:00 +0900
+Subject: [PATCH] fix: local addresses are not sent in peer exchange
+
+---
+diff --git a/src/ut_pex.cpp b/src/ut_pex.cpp
+index 957a6f27e..3012d8022 100644
+--- a/src/ut_pex.cpp
++++ b/src/ut_pex.cpp
+@@ -137,6 +137,8 @@ namespace libtorrent { namespace {
+ 				if (!send_peer(*peer)) continue;
+ 
+ 				tcp::endpoint remote = peer->remote();
++				// WASM patch: an address on a local network means nothing to a peer outside it
++				if (aux::is_local(remote.address())) continue;
+ 				m_old_peers.insert(remote);
+ 
+ 				auto const di = dropped.find(remote);
+@@ -520,6 +522,8 @@ namespace libtorrent { namespace {
+ 			for (auto const peer : m_torrent)
+ 			{
+ 				if (!send_peer(*peer)) continue;
++				// WASM patch: an address on a local network means nothing to a peer outside it
++				if (aux::is_local(peer->remote().address())) continue;
+ 
+ 				// don't write too big of a package
+ 				if (num_added >= max_peer_entries) break;
