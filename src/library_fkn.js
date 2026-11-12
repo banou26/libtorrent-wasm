@@ -240,11 +240,12 @@ addToLibrary({
         if (!mine()) { try { sock.destroy() } catch (e) {} ; return }
         FKN.queueAccepted(st, sock)
       })
-      server.on('error', (err) => {
+      // not kept as st.error: nothing on a listener clears it, so select would hand the fd to
+      // accept() on every pass, and an accept() failing with it would end libtorrent's accepting
+      // here (session_impl.cpp on_accept_connection)
+      server.on('error', () => {
         if (!mine()) return
-        st.error = err.errno || FKN.err.IO
         st.listening = false
-        FKN.scheduleTick()
         FKN.reopenListen(st, 'error')
       })
       // a dropped tunnel usually looks like a clean close rather than an error, exactly as for udp
@@ -344,11 +345,12 @@ addToLibrary({
         FKN._dbgJsBusyUs += (performance.now() - _t0) * 1000
         FKN._dbgJsHandlerCalls++
       })
-      sock.on('error', (err) => {
-        if (!mine()) return
-        st.error = err.errno || FKN.err.IO
-        FKN.reopenUdp(st, 'error')
-      })
+      // Not kept as st.error. Nothing would clear it on a udp fd, so select would report the fd
+      // ready on every pass and one tick would spin for good. Returning it once from recvfrom is no
+      // better: on almost any read error libtorrent stops reading the fd for good
+      // (session_impl.cpp on_udp_packet), so the replacement socket would never be read. The
+      // reopen is the whole answer.
+      sock.on('error', () => { if (mine()) FKN.reopenUdp(st, 'error') })
       // a dropped tunnel usually looks like a clean close rather than an error
       sock.on('close', () => { if (mine()) FKN.reopenUdp(st, 'close') })
       sock.on('listening', () => {
@@ -910,7 +912,7 @@ addToLibrary({
         )) revents |= 1
         if ((events & 4) && (
           (st.kind === 'tcp' && st.connected) ||
-          (st.kind === 'udp' && true)
+          (st.kind === 'udp' && !st.dead)
         )) revents |= 4
         if (st.error) revents |= 8
         if (st.kind === 'tcp') {
@@ -1250,9 +1252,12 @@ addToLibrary({
       (st.kind === 'udp' && st.udpRecv.length > 0) ||
       (st.kind === 'tcp-listen' && st.acceptQueue.length > 0)
     )
+    // A udp fd waiting for its replacement socket answers sendto with EAGAIN, and libtorrent then
+    // waits for writable before uTP sends again: reported writable, one tick made 3.1 million sendto
+    // calls in 4 s. reopenUdp schedules a tick once the socket is back.
     const writable = (st) => st && (
       (st.kind === 'tcp' && st.connected) ||
-      st.kind === 'udp'
+      (st.kind === 'udp' && !st.dead)
     )
     let total = 0
     for (const fd of wantR) { const st = FKN.fds.get(fd); if (readable(st) || (st && st.error)) { setBit(readPtr, fd); total++ } }

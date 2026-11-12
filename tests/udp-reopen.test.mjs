@@ -35,11 +35,11 @@ const loadShim = (dgram) => {
   let library
   const addToLibrary = (obj) => { library = obj }
   const fn = new Function(
-    'addToLibrary', 'Module', 'HEAPU8', 'HEAPU16', 'HEAPU32', 'performance', 'console',
+    'addToLibrary', 'Module', 'HEAPU8', 'HEAP16', 'HEAPU16', 'HEAP32', 'HEAPU32', 'performance', 'console',
     source + '\nreturn null',
   )
   fn(addToLibrary, { fkn: { net: {}, dgram, storage: null } }, heap,
-    new Uint16Array(heap.buffer), new Uint32Array(heap.buffer),
+    new Int16Array(heap.buffer), new Uint16Array(heap.buffer), new Int32Array(heap.buffer), new Uint32Array(heap.buffer),
     { now: () => 0 }, { log() {}, warn() {}, error() {} })
 
   // Emscripten emits `$FKN` as a module-level `var FKN`, so the member functions refer to the bare identifier
@@ -134,6 +134,39 @@ test('sends report EAGAIN while the socket is gone instead of claiming success',
   assert.equal(after, 16, 'once the replacement is up, sends work again')
   assert.equal(dgram.sockets[1].sent.length, 1, 'and they go out over the new socket')
   settled(st)
+})
+
+test('a udp fd is not writable while its socket is being replaced, in poll and in select', async (t) => {
+  const dgram = makeDgram()
+  const { FKN, library, heap } = loadShim(dgram)
+  const st = boundUdpState(FKN)
+  t.after(() => settled(st))
+  const fd = FKN.newFd(st)
+  const view = new DataView(heap.buffer)
+
+  const pollfd = 4096
+  const polledWritable = () => {
+    view.setInt32(pollfd, fd, true)
+    view.setInt16(pollfd + 4, 4, true)
+    library.$FKN_poll(pollfd, 1)
+    return (view.getInt16(pollfd + 6, true) & 4) !== 0
+  }
+  const writeSet = 8192
+  const selectedWritable = () => {
+    heap.fill(0, writeSet, writeSet + 128)
+    heap[writeSet + (fd >>> 3)] |= 1 << (fd & 7)
+    library.__syscall__newselect(fd + 1, 0, writeSet, 0, 0)
+    return ((heap[writeSet + (fd >>> 3)] >> (fd & 7)) & 1) === 1
+  }
+  const writable = () => [polledWritable(), selectedWritable()]
+
+  assert.deepEqual(writable(), [true, true], 'a healthy udp fd is not writable')
+  st.socket.emit('error', new Error('WebVPN session closed'))
+  st.socket.emit('close')
+  assert.deepEqual(writable(), [false, false], 'an fd whose sends answer EAGAIN reads as writable')
+
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  assert.deepEqual(writable(), [true, true], 'the replacement socket is not writable')
 })
 
 test('repeated failures back off, and traffic resets the schedule', async () => {
