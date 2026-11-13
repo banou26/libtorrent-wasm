@@ -132,8 +132,9 @@ test('one session takes pieces of one torrent from an ordinary tcp peer and from
   if (!rig) return
   const { defer, Routed } = rig
   const fx = fixture(defer, 8 * MiB)
-  // each seed is held to a rate, so neither can serve the whole file before the other is asked
-  const ordinary = await ordinarySeed(defer, fx, MiB)
+  // each seed is held to a rate, so neither can serve the whole file before the other is asked, and the tcp
+  // seed, which starts first, to half the other's
+  const ordinary = await ordinarySeed(defer, fx, MiB / 2)
   const rtc = await relaySide(defer, path.join(fx.root, 'rtc'), Routed)
   rtc.session.setRateLimits({ upload: MiB })
   await seed(rtc, fx, 'dl')
