@@ -118,6 +118,31 @@ test('a socket that delivers many datagrams in one task is handed 128 in a task 
   t.diagnostic(`${batches.length} tasks, at most ${most} datagrams in one`)
 })
 
+test('arrivals in tasks of their own start the count again once in a millisecond, by the clock', async (t) => {
+  const { local, channel, handed } = await warmed(t, { sendBufferSize: 4 * MiB })
+  // from here on the factory hears what this test delivers and nothing else, no timer fires, and the clock is this test's
+  const deliver = local.socket.emit
+  local.socket.emit = () => {}
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  // whole milliseconds and quarters of one, so that a difference of 1 is 1 exactly; 10 ms on, so the last count is over
+  const start = Math.ceil(performance.now()) + 10
+  let now = start
+  t.mock.method(performance, 'now', () => now)
+  write(channel, 256)
+  await Promise.resolve()
+  const first = handed.length
+  assert.ok(first > 100 && first <= 128, `the write handed the socket ${first} datagrams`)
+  // a datagram of no connection is dropped, and it is an arrival all the same
+  const stray = [new Uint8Array(20), { address: '198.51.100.99', port: 5555 }]
+  for (const [at, expected] of [[0, 128], [0.25, 128], [0.5, 128], [0.75, 128], [1, 256], [1.75, 256], [2, 384]]) {
+    // two turns of the event loop: the factory has seen a task begin since it last handed anything over
+    for (let turn = 0; turn < 2; turn++) await new Promise((resolve) => setImmediate(resolve))
+    now = start + at
+    deliver('message', ...stray)
+    assert.equal(handed.length - first, expected, `after an arrival ${at} ms into the count`)
+  }
+})
+
 test('what waits goes out on a timer of one millisecond when nothing arrives, 128 datagrams each time', async (t) => {
   const { local, channel, handed } = await warmed(t, { sendBufferSize: 4 * MiB })
   // from here on nothing reaches the factory, and its timers fire when this test says so
