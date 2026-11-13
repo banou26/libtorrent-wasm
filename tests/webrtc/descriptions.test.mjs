@@ -262,6 +262,19 @@ test('a closed connection refuses everything with InvalidStateError', async (t) 
   await sleep(20)
   assert.equal(pc.iceGatheringState, 'new')
 
+  // nor after a close made by the handler of the first one
+  const other = new local.RTCPeerConnection()
+  other.createDataChannel('x')
+  const events = []
+  other.onicegatheringstatechange = () => {
+    events.push(other.iceGatheringState)
+    other.close()
+  }
+  other.onicecandidate = () => events.push('icecandidate')
+  await other.setLocalDescription()
+  await sleep(20)
+  assert.deepEqual(events, ['gathering'])
+
   local.close()
   assert.throws(() => new local.RTCPeerConnection(), { name: 'InvalidStateError' })
 })
