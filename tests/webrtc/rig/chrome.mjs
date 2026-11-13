@@ -20,13 +20,10 @@ export function findChrome() {
  * empty page for anything else. No COOP or COEP header, so its pages are not cross-origin isolated.
  */
 export async function launchChrome(executablePath, files = {}) {
-  const server = http.createServer((request, response) => {
-    const [body, type] = files[request.url] ?? ['<!doctype html><title>webrtc</title>', 'text/html']
-    response.writeHead(200, { 'content-type': type }).end(body)
-  })
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   // on a Wayland desktop these two make Chrome open a window even when asked for none
   const { WAYLAND_DISPLAY: _display, NIXOS_OZONE_WL: _ozone, ...env } = process.env
+  // Before the server, so that a Chrome that does not launch leaves nothing listening: a server left open
+  // keeps the test file from ending, and nothing but a test's own time limit ends a file on Node 24.
   const browser = await chromium.launch({
     executablePath,
     headless: true,
@@ -40,6 +37,11 @@ export async function launchChrome(executablePath, files = {}) {
       '--disable-features=WebRtcHideLocalIpsWithMdns',
     ],
   })
+  const server = http.createServer((request, response) => {
+    const [body, type] = files[request.url] ?? ['<!doctype html><title>webrtc</title>', 'text/html']
+    response.writeHead(200, { 'content-type': type }).end(body)
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   return {
     browser,
     async page() {
