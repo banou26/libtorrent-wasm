@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import test from 'node:test'
+import { Worker } from 'node:worker_threads'
 
 import { DEFAULT_ICE_SERVERS, DEFAULT_TRACKERS, trackersOf, trackerUrl } from '../../build/webtorrent/index.js'
 import * as page from '../../build/webtorrent/page.js'
@@ -18,6 +19,27 @@ const bencode = value => {
 const torrent = extra => bencode({
   info: { length: 1 << 20, name: 'fixture.bin', 'piece length': 1 << 18, pieces: crypto.randomBytes(80) },
   ...extra,
+})
+
+/**
+ * What trackersOf gives for each input, read in a thread that is ended after `ms` or at 64 MiB of heap. The
+ * reader is one synchronous call: if a change makes it read the same bytes for ever, nothing in the thread that
+ * called it could stop it, and no test timeout would fire. A failure names the input the reader stopped on.
+ */
+const readEach = (inputs, ms = 5000) => new Promise((resolve, reject) => {
+  const read = []
+  const thread = new Worker(new URL('./trackers-thread.mjs', import.meta.url), {
+    workerData: inputs, resourceLimits: { maxOldGenerationSizeMb: 64 },
+  })
+  const finish = error => {
+    clearTimeout(deadline)
+    void thread.terminate()
+    if (error) reject(error)
+    else resolve(read)
+  }
+  const deadline = setTimeout(() => finish(new Error(`input ${read.length} was not read in ${ms} ms`)), ms)
+  thread.on('message', urls => { if (read.push(urls) === inputs.length) finish() })
+  thread.on('error', error => finish(new Error(`input ${read.length} ended the reader: ${error.message}`)))
 })
 
 test('the defaults are the two trackers and the STUN host the owner chose', () => {
@@ -51,13 +73,16 @@ test('a .torrent file gives the ws and wss trackers of announce and of every tie
   assert.deepEqual(trackersOf(torrent({ announce: 'udp://tracker.test:6969' })), [])
 })
 
-test('bytes that are not a torrent give an empty list and never throw', () => {
+test('bytes that are not a torrent give an empty list and never throw', async () => {
   const good = torrent({ announce: 'wss://first.test' })
   const cases = [
     new Uint8Array(0), crypto.randomBytes(512), good.subarray(0, good.length - 40), Buffer.from('l'.repeat(100_000)),
     Buffer.from('d8:announce'), Buffer.from('i12e'), Buffer.from('d8:announcei7ee'), Buffer.from('99999999999:x'),
+    // Cut inside a length, and lengths that are not one, each after a tracker the reader has already seen.
+    Buffer.from('d12'), Buffer.from('d8:announce16:wss://first.test12'),
+    Buffer.from('d8:announce16:wss://first.test1x:ae'), Buffer.from('d8:announce16:wss://first.test-3:e'),
   ]
-  for (const bytes of cases) assert.deepEqual(trackersOf(bytes), [])
+  assert.deepEqual(await readEach(cases), cases.map(() => []))
 })
 
 test('a tracker URL is normalised, so one tracker spelt two ways is one socket', () => {

@@ -58,9 +58,11 @@ type Bencoded = number | Uint8Array | Bencoded[] | Map<string, Bencoded>
 const decode = (bytes: Uint8Array): Bencoded => {
   let at = 0
   const until = (stop: number): string => {
-    const start = at
-    while (bytes[at] !== stop) if (++at >= bytes.length) throw new Error('truncated')
-    return latin1(bytes.subarray(start, at++))
+    const end = bytes.indexOf(stop, at)
+    if (end < 0) throw new Error('truncated')
+    const text = latin1(bytes.subarray(at, end))
+    at = end + 1
+    return text
   }
   const value = (): Bencoded => {
     const head = bytes[at]
@@ -86,9 +88,10 @@ const decode = (bytes: Uint8Array): Bencoded => {
       at++
       return dict
     }
-    const length = Number(until(0x3a))
-    if (!Number.isInteger(length) || length < 0 || at + length > bytes.length) throw new Error('bad string')
-    return bytes.subarray(at, at += length)
+    const length = until(0x3a)
+    // Digits only, so that `at` never goes back or stops being a number: either would read the same bytes for ever.
+    if (!/^\d+$/.test(length)) throw new Error('bad string')
+    return bytes.subarray(at, at += Number(length))
   }
   return value()
 }
