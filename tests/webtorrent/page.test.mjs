@@ -262,6 +262,16 @@ test('a constructor the browser refuses reaches the worker as LinksFull', async 
   await assert.rejects(links.answer('v=0\r\na=fake:1\r\n'), LinksFull)
 })
 
+test('a request the page refused is over for the worker: no flush follows it and none of its timers is left', async t => {
+  const timers = () => process.getActiveResourcesInfo().filter(kind => kind === 'Timeout').length
+  const before = timers()
+  const { links, worker } = half(t, fakeRtc({ capacity: 0 }))
+  await assert.rejects(links.offer(), LinksFull)
+  await settle()
+  assert.deepEqual(worker.said, { offer: 1 })
+  assert.equal(timers(), before)
+})
+
 test('an answer the page cannot apply closes the link on the worker side', async t => {
   const { links } = half(t, fakeRtc())
   const offer = await links.offer()
