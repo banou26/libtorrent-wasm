@@ -90,7 +90,9 @@ describe('a relay that comes back after 22 s', { concurrency: true }, () => {
     assert.deepEqual(now.listeners.map((l) => l.port), [before.port, before.port])
 
     // A transmission seed keeps its side of the old connection and turns a redial away until that
-    // reset, which it matches on the id our packets carried. A libtorrent one also checks the ack.
+    // reset, which it matches on the id our packets carried. A libtorrent one also checks the ack, but
+    // takes the FIN of our disconnect as well, so here only what the reset says can be checked; its
+    // effect shows against transmission (tests/rig/relay-outage.mjs).
     const seedAt = `127.0.0.1:${seeding.port}`
     const last = now.lastBefore[seedAt]
     assert.ok(last, `no uTP packet went to the seed before the outage: ${JSON.stringify(now.lastBefore)}`)

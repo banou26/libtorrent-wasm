@@ -345,7 +345,7 @@ addToLibrary({
      * The outage past which a healed udp socket has its uTP peers reset and dialled again. The reopen
      * heals 0.25, 1.25, 3.25 or 5.25 s after the drop, so a relay back within about 3 s leaves the
      * connections alone, and they carry on by themselves, every remote still resending: measured,
-     * bytes again 0.95 s after a relay away for 1 s and 2.2 s after one away for 2 s with the
+     * bytes again 0.95 s after a relay away for 1 s and 2.2 to 3.4 s after one away for 2 s with the
      * connections kept, against 5.4 to 6.5 s and 4.4 to 5.2 s with the redial. Each resend backs off
      * further, so a connection kept through a longer outage waits about as long again for its next one.
      */

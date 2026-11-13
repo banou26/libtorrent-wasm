@@ -225,28 +225,47 @@ socket and its TCP listener. The socket layer keeps both fds and opens new
 sockets under them, so libtorrent never sees the outage:
 
 - It retries after 250 ms, 1 s, then every 2 s, so a relay that is back is
-  found within 2 s.
+  found within 2 s. A socket that is back starts this over.
 - Each retry asks for the port the socket first held, the one trackers, peer
-  exchange and the DHT were given and the one `reachable().port` names. Only
-  an outage older than a minute (`KEEP_PORT_MS`) takes any free port instead,
-  for a number somebody else took meanwhile. That port is then not announced
+  exchange and the DHT were given and the one `reachable().port` names. For the
+  first minute of an outage (`KEEP_PORT_MS`) it asks for nothing else, since a
+  relay that lost the connection holds the port for the old session a while.
+  After that, a refusal of it is followed at once by a retry on any free port,
+  so a relay that comes back with the port free still hands it back, and only
+  a number somebody else took is given up. That new port is then not announced
   anywhere, and `reachable().portOpen` reads false.
-- When the UDP socket comes back after more than 3 s (`REDIAL_AFTER_MS`), every
-  uTP peer is sent a reset and dialled again, 2 s later unless it has dialled
-  us back first. A remote keeps its side of the old connection until its own
-  resends give up and refuses a second one from us meanwhile, so the reset is
-  what lets the new one in. A shorter outage leaves the connections alone:
-  every remote is still resending, and they carry on by themselves.
+- When the UDP socket comes back more than 4 s after the drop
+  (`REDIAL_AFTER_MS`), which is a relay away for more than about 3 s, every uTP
+  peer the engine can dial back is sent a reset and disconnected, and once the
+  socket has stayed up 2 s the ones that have not dialled us back are dialled
+  again. A remote keeps its side of the old connection until its own resends
+  give up and refuses a second one from us meanwhile, so the reset is what lets
+  the new one in. A relay that goes away again within those 2 s holds the
+  redial until a socket lasts.
+- Left alone: the connections through a shorter outage, since every remote is
+  still resending and they carry on by themselves, and a peer that dialled us
+  over uTP, which nothing could dial back and which carries on the same way.
 - `reachable().listeners` reads `healing` from the drop until each socket is
   back.
 
 Measured with `tests/rig/relay-outage.mjs` (4 transmission seeders at 100 kB/s,
 the relay away 20 s at 20% of a 30 MB download, a reader in the file): bytes
-moved again 4.0 to 6.0 s after the relay was back, on the same port (7 runs).
-Before, libtorrent kept the dead connections until uTP gave up on its resends
-(194 to 197 s after the drop), waited `min_reconnect_time` (60 s) to dial again,
-and the bytes came back 237 to 240 s after the relay, on two new ports. With the
-relay away 1 s, the connections carried on and bytes moved again 1.0 s after it.
+moved again 4.0 to 4.5 s after the relay was back, on the same port (4 runs),
+and 4.5 to 12.0 s without the reset (4 runs, alternated). Before, libtorrent
+kept the dead connections until uTP gave up on its resends (194 to 197 s after
+the drop), waited `min_reconnect_time` (60 s) to dial again, and the bytes came
+back 237 to 240 s after the relay, on two new ports. On two engines over
+loopback (`tests/relay-return.test.mjs` and the same cases by hand, 3 runs
+each): a seed behind the relay served the peer that had dialled it again 2.3 to
+2.5 s after the relay, a relay away again 1 s after it came back cost 5.0 to
+5.5 s after its second return, and a relay away 2 s cost 2.2 to 3.4 s with the
+connections kept. One away 60 s or 300 s came back on the same port.
+
+What is left: a relay that goes away again in the moment between the redial's
+dial and the remote's answer leaves the remote holding a connection this end
+has dropped, and the remote turns the next dial away. With the relay away again
+3 s after it came back, the bytes moved within 5 s of its second return in 3 of
+6 runs, after 50 to 52 s in 2, and not within 90 s in 1.
 
 ## WebRTC peers
 
