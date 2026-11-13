@@ -1108,6 +1108,50 @@ test('an answer to an offer we never made, or a second answer to one, changes no
   assert.equal(first.closes, 0)
 })
 
+test('on the wire our peer id and every offer id are exactly 20 bytes, and every id and hash is a JSON string of 20 characters of one byte each', async t => {
+  const r = rig(t)
+  r.tracker.phantoms = { complete: 3, incomplete: 0 }
+  await r.start(1, { left: 500 })
+  // A hash with a quote, a backslash, a control byte and bytes above 127 in it, and a remote id of the same kind.
+  await r.start(2, { infoHash: '225c0a7f80a0e9ff' + 'c5'.repeat(12) })
+  const remote = new Remote(r, undefined, fakeRtc())
+  remote.id = Buffer.from('2d4c54323131302d000a225c7f809fa0e9feff41', 'hex').toString('latin1')
+  assert.equal(await remote.connect(1), true)
+  r.session.set(1, { left: 0 })
+  await advance(t, SECOND)
+  r.session.pause(1)
+  await settle()
+
+  /** A string as a libtorrent 2.1 peer takes an id: one byte from each character, and none above 255. */
+  const bytesOf = id => [...id].map(character => character.codePointAt(0))
+  const twenty = (id, what) => {
+    assert.equal(typeof id, 'string', what)
+    assert.equal(bytesOf(id).length, 20, `${what} is 20 characters`)
+    assert.ok(bytesOf(id).every(byte => byte <= 255), `${what} has one byte in each character`)
+  }
+  const kinds = new Set()
+  for (const frame of r.WebSocket.frames) {
+    // What the socket carries, and the same with one character for each byte of it.
+    const wire = Buffer.from(frame, 'utf8')
+    const text = wire.toString('latin1')
+    const message = JSON.parse(wire.toString('utf8'))
+    const kind = message.answer ? 'answer' : message.offers.length ? 'offers' : message.event ?? 'no event'
+    kinds.add(kind)
+    twenty(message.info_hash, `the info hash of ${kind}`)
+    const ours = [['peer_id', message.peer_id], ...(message.answer ? [] : message.offers.map(offer => ['offer_id', offer.offer_id]))]
+    for (const [name, id] of ours) {
+      twenty(id, `the ${name} of ${kind}`)
+      assert.ok(text.includes(`"${name}":"${id}"`), `the ${name} of ${kind} is 20 bytes between its quotes: ${JSON.stringify(id)}`)
+    }
+    if (message.answer) {
+      assert.equal(message.to_peer_id, remote.id, 'the remote’s id goes back as it came')
+      twenty(message.offer_id, 'the offer id an answer names')
+    }
+  }
+  assert.deepEqual([...kinds].sort(), ['answer', 'completed', 'offers', 'started', 'stopped'], 'every kind of frame was read')
+  assert.equal(r.WebSocket.frames.filter(frame => JSON.parse(frame).offers?.length).flatMap(frame => JSON.parse(frame).offers).length, 6)
+})
+
 test('our own id coming back from the tracker is ignored', async t => {
   const r = rig(t)
   await r.start(1)

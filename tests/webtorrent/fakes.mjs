@@ -131,6 +131,8 @@ export const fakeWebSocket = trackers => {
   const map = new Map(Object.entries(trackers))
   return class FakeWebSocket {
     static opened = []
+    /** Every frame sent on an open socket, as the text handed to `send`. */
+    static frames = []
     readyState = 0
     onopen = null
     onmessage = null
@@ -154,7 +156,9 @@ export const fakeWebSocket = trackers => {
     // before a close still arrives.
     send(data) {
       if (this.readyState === 0) throw new Error('InvalidStateError')
-      if (this.readyState === 1) queueMicrotask(() => this.tracker.receive(this, data))
+      if (this.readyState !== 1) return
+      FakeWebSocket.frames.push(data)
+      queueMicrotask(() => this.tracker.receive(this, data))
     }
 
     /** A frame from the tracker: an object is sent as JSON, anything else as it is. */
