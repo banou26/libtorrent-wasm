@@ -631,7 +631,6 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       byHash.set(t.hash, t)
       changed()
     }
-    t.view = view
 
     const wanted = trackersFor(view, defaults, relay)
     for (const url of wanted) {
@@ -643,6 +642,9 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       changed()
     }
     leave(t, wanted)
+    // Only now: `stopped` to a tracker that is left carries the figures of the read before, so a passed tracker
+    // is not told the size of a magnet whose metadata has just said private.
+    t.view = view
 
     if (view.hasMetadata && view.left > 0) t.leeching = true
     if (t.leeching && !t.completed && seeding(view)) {
