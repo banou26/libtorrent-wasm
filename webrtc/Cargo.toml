@@ -1,0 +1,33 @@
+[package]
+name = "webrtc"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+str0m = { version = "=0.25.0", default-features = false }
+str0m-proto = { version = "=0.8.0", features = ["dtls"] }
+dimpl = { version = "=0.9.0", default-features = false, features = ["rust-crypto"] }
+hmac = "0.13"
+aes-gcm = "0.11"
+aes = "0.9"
+ctr = "0.10"
+p256 = { version = "0.14", features = ["ecdh"] }
+sha1 = "0.11"
+sha2 = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# sctp-proto as crates.io has it, with webrtc/patches applied: `node webrtc/patch-sctp-proto.mjs`
+# makes this directory, and `npm run webrtc-wasm` runs it first. What each patch buys is
+# measured in the README; deleting a patch file takes its change out.
+[patch.crates-io]
+sctp-proto = { path = "vendor/sctp-proto" }

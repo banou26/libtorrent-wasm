@@ -1,6 +1,8 @@
 node_modules
 build
 dist
+webrtc/target
+webrtc/vendor
 .em_cache
 .playwright-mcp
 .vitest-attachments
