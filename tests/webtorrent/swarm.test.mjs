@@ -476,6 +476,34 @@ test('a remote with an open channel is not answered again', async t => {
   assert.equal(r.session.streamsOf(1).length, 1)
 })
 
+test('a remote is the peer id of its tracker messages, never the one in its handshake, and what loses to its open channel is closed at our end', async t => {
+  const r = rig(t)
+  r.tracker.phantoms = { complete: 1, incomplete: 0 }
+  await r.start(1)
+  const remote = new Remote(r, undefined, fakeRtc())
+  assert.equal(await remote.connect(1), true)
+  // As a libtorrent 2.1 peer: the id in its BitTorrent handshake is not the one it gave the tracker.
+  const inHandshake = '-LT2110-hhhhhhhhhhhh'
+  remote.sockets[0].write(Buffer.concat([
+    Buffer.from('\x13BitTorrent protocol'), Buffer.alloc(8), Buffer.alloc(20, 1), Buffer.from(inHandshake),
+  ]))
+  await settle()
+  assert.equal(Buffer.concat(r.session.streams[0].bytes).length, 68)
+
+  // Under its tracker id nothing opens beside the channel, and it closes nothing, as a 2.1 peer never does.
+  assert.equal(await remote.connect(1), false, 'its offer is not answered')
+  await remote.answer(1, r.offered(1)[0].offers[0])
+  await advance(t, CLOSING)
+  assert.equal(r.session.streams.length, 1, 'its answer to an offer of ours opens nothing')
+  assert.equal(r.open(), 1, 'and our end of that offer is closed by us: the open channel is our only connection')
+  assert.equal(remote.closes, 0)
+
+  const stranger = new Remote(r, undefined, fakeRtc())
+  stranger.id = inHandshake
+  assert.equal(await stranger.connect(1), true, 'a remote whose tracker id is that handshake id is somebody else')
+  assert.equal(r.session.streamsOf(1).length, 2)
+})
+
 test('an open channel made from our offer stands against that remote’s later offer, whatever the ids', async t => {
   const r = rig(t)
   r.tracker.phantoms = { complete: 1, incomplete: 0 }
