@@ -55,6 +55,7 @@ const staysGone = async (session, handle) => {
   await new Promise((resolve) => setTimeout(resolve, 1000))
   session.pauseTorrent(handle)
   assert.equal(session.status(handle), null)
+  assert.equal(session.files(handle), null)
 }
 
 test('a magnet removed before the alert pass goes', async (t) => {
@@ -108,6 +109,20 @@ test('a torrent added from resume data and removed with its files before the ale
   removeBeforeThePass(session, resumed, true)
   await waitFor('the resumed torrent and its file to go', () => removed() === 2 && !fs.existsSync(onDisk))
   await staysGone(session, resumed)
+})
+
+// the tick has made the torrent, so the pass hears of it before the tick that runs the remove
+test('a .torrent removed with its files after a tick, with the alert pass before the next tick, goes and stays gone', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const { session, onDisk, removed } = await engineHolding(defer, fx)
+
+  const file = session.addTorrentFile(fx.meta.torrent, '/dl')
+  session.tick()
+  session.removeTorrent(file, true)
+  session.popAlerts()
+  await waitFor('the torrent and its file to go', () => removed() === 1 && !fs.existsSync(onDisk))
+  await staysGone(session, file)
 })
 
 test('an add after an early remove stands, where it was asked to: add, remove, add again before the alert pass', async (t) => {

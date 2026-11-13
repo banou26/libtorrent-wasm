@@ -82,6 +82,8 @@ struct session_state {
 
   std::unordered_map<std::uint32_t, lt::torrent_handle> handles;
   std::unordered_map<std::string, std::uint32_t> hash_ids;
+  // the hash_ids key of every remove posted and not yet run, once per remove
+  std::unordered_multiset<std::string> removing;
   // piece and file counts, cached when the torrent-ready record is built. Every synchronous
   // libtorrent getter (torrent_file(), get_piece_priorities()) sync_calls an io_context that only
   // runs when JS ticks, so it would deadlock here: a bounds check has to read this, never the handle.
@@ -896,10 +898,12 @@ LT_API void lt_session_pump_alerts() {
     g_pending_alerts.put_u32(static_cast<std::uint32_t>(msg.size()));
     g_pending_alerts.put_bytes(msg.data(), msg.size());
 
-    // a torrent removed before this pass came round is aborted, and stays out
+    // a torrent with a remove asked for stays out: aborted once the remove ran, and still
+    // listed in `removing` while it waits for its tick
     if (auto* ata = lt::alert_cast<lt::add_torrent_alert>(a)) {
       auto const t = ata->handle.native_handle();
-      if (t && !t->is_aborted()) register_handle(ata->handle);
+      if (t && !t->is_aborted() && !g_session->removing.count(t->info_hash().get_best().to_string()))
+        register_handle(ata->handle);
     }
   }
 
@@ -961,11 +965,12 @@ LT_API int lt_session_remove_torrent_ex(std::uint32_t id, int delete_files) {
   auto const& ids = g_session->hash_ids;
   auto const it = std::find_if(ids.begin(), ids.end(), [id](auto const& e) { return e.second == id; });
   if (it == ids.end()) return -1;
-  lt::info_hash_t const ih(lt::sha1_hash(it->first.data()));
   lt::remove_flags_t const flags = delete_files ? lt::session_handle::delete_files : lt::remove_flags_t{};
-  boost::asio::post(*g_session->ioc, [ih, flags] {
+  g_session->removing.insert(it->first);
+  boost::asio::post(*g_session->ioc, [key = it->first, flags] {
     auto const s = g_session->ses->native_handle();
-    s->remove_torrent(s->find_torrent_handle(ih), flags);
+    s->remove_torrent(s->find_torrent_handle(lt::info_hash_t(lt::sha1_hash(key.data()))), flags);
+    g_session->removing.erase(g_session->removing.find(key));
   });
   g_session->handles.erase(id);
   g_session->geometry.erase(id);
