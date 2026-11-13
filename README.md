@@ -336,9 +336,9 @@ worker.addEventListener('message', ({ data }) => {
 - **The trackers and the STUN host are the caller's to pass.** `DEFAULT_TRACKERS` and `DEFAULT_ICE_SERVERS`
   are constants, and nothing is contacted when they are left out. A torrent's own `ws` and `wss` trackers come
   from the session (`webSocketTrackers`), from a magnet link, a .torrent file and resume data alike.
-- **The class** is `RTCPeerConnection` of `@banou/ponyfill`. Chromium counts a closed connection against its
-  500 a page until a garbage collection, and that class brings those slots back when a construction is
-  refused. The browser's own class works until that limit.
+- **The class** is `RTCPeerConnection` of `@banou/ponyfill`, in a release after 0.0.13, which has none.
+  Chromium counts a closed connection against its 500 a page until a garbage collection, and that class
+  brings those slots back when a construction is refused. The browser's own class works until that limit.
 - **A magnet that names no `ws` or `wss` tracker finds nobody in this mode.** Until its metadata says whether
   it is private it is announced to its own trackers only, and with no relay only a peer can bring the metadata.
 

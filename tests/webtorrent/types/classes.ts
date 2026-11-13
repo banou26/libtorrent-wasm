@@ -7,7 +7,8 @@ import { createWebRTC } from '../../../build/webrtc/index'
 type Class = RtcLinksOptions['RTCPeerConnection']
 type Platform = InstanceType<typeof RTCPeerConnection>
 
-// what @banou/ponyfill declares for its class
+// @banou/ponyfill declares its class as the platform's type. Written out here, since the package is no
+// dependency of this one.
 declare const Ponyfill: typeof globalThis.RTCPeerConnection
 
 /** The platform's class, the ponyfill's and the WebRTC entry's, each under the links and the first two in a page. */
