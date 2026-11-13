@@ -44,7 +44,7 @@ const CODE_TO_WASI = {
 
 // Registered before the shim's own handler, so mutating in place is enough:
 // EventEmitter runs listeners in registration order.
-const normalizeErrno = (err) => {
+export const normalizeErrno = (err) => {
   if (err && typeof err === 'object') err.errno = CODE_TO_WASI[err.code] ?? WASI_EIO
 }
 

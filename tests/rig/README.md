@@ -30,6 +30,13 @@ npm run test:bad-peer -- --seeders 2 --bad 8 --withhold 12 --runs 2
 npm run test:bad-peer -- --seeders 2 --no-bad --runs 3      # the control
 ```
 
+A relay outage, timed (needs transmission like the swarm runs):
+
+```
+node tests/rig/relay-outage.mjs --play                 # relay away 20 s at 20%, back on the same ports
+node tests/rig/relay-outage.mjs --play --moved         # back with the ports somebody else took
+```
+
 Needs transmission on PATH-ish; point `RIG_TRANSMISSION` at a store path, or:
 
 ```
@@ -52,6 +59,8 @@ nix build --no-link --print-out-paths 'nixpkgs#transmission_4'
 | `stream-engine.mjs` | what the peer stream tests share: an engine on `offlineHost()` with its pump, a fixture, a seeder, one ordered teardown |
 | `counting-host.mjs` | node's sockets with every connect and datagram recorded, and nothing allowed off this machine |
 | `offline-engine.mjs` | the engine in a worker thread on `offlineHost()`, reporting what it asked of the host |
+| `relay-host.mjs` | node's sockets on loopback behind a relay that can be taken away and brought back, with `@fkn/lib`'s events; the ports its sockets held can come back taken |
+| `relay-outage.mjs` | a download from transmission seeders with the relay taken away part way, timed second by second (`--moved`, `--play`, `--outage`) |
 
 ## What it does not answer
 
