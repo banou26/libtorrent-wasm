@@ -149,6 +149,16 @@ test('the remote closing its connection closes our channel and fails our connect
   assert.throws(() => pc.createDataChannel('late'), { name: 'InvalidStateError' })
 })
 
+test('the remote reports bytes that reached it before it was asked to count them', async (t) => {
+  // the rig's own race: a small message can be at the remote before the request to count it is
+  const { channel, remote } = await linked(t)
+  channel.send(new Uint8Array([1, 2, 3, 4]))
+  await settled(channel, 3000)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  remote.send({ t: 'expect', bytes: 4 })
+  assert.equal((await remote.next('received', 3000)).bytes, 4)
+})
+
 test('the remote closing only its channel closes ours and leaves the connection up', async (t) => {
   const { pc, channel, remote } = await linked(t, { offer: false })
   const states = []

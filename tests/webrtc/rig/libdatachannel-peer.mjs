@@ -19,6 +19,13 @@ pc.onGatheringStateChange((state) => {
   send({ t: 'description', type, sdp })
 })
 
+/** Says what has arrived once it is all that was asked for, whichever came first: the bytes or the asking. */
+function report() {
+  if (!receiving.expect || receiving.bytes < receiving.expect) return
+  send({ t: 'received', bytes: receiving.bytes, messages: receiving.messages, sha256: receiving.hash.digest('hex') })
+  Object.assign(receiving, { bytes: 0, messages: 0, hash: crypto.createHash('sha256'), expect: 0 })
+}
+
 function wire(opened) {
   channel = opened
   channel.onOpen(() =>
@@ -30,9 +37,7 @@ function wire(opened) {
     receiving.bytes += message.length
     receiving.messages++
     receiving.hash.update(message)
-    if (!receiving.expect || receiving.bytes < receiving.expect) return
-    send({ t: 'received', bytes: receiving.bytes, messages: receiving.messages, sha256: receiving.hash.digest('hex') })
-    Object.assign(receiving, { bytes: 0, messages: 0, hash: crypto.createHash('sha256'), expect: 0 })
+    report()
   })
 }
 pc.onDataChannel(wire)
@@ -64,7 +69,10 @@ function transfer({ bytes, size }) {
 process.on('message', (message) => {
   if (message.t === 'offer') wire(pc.createDataChannel(message.label))
   else if (message.t === 'remote') pc.setRemoteDescription(message.sdp, message.type)
-  else if (message.t === 'expect') receiving.expect = message.bytes
+  else if (message.t === 'expect') {
+    receiving.expect = message.bytes
+    report()
+  }
   else if (message.t === 'send') transfer(message)
   else if (message.t === 'say') channel.sendMessage(message.text)
   else if (message.t === 'pair') send({ t: 'pair', ...pc.getSelectedCandidatePair() })
