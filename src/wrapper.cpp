@@ -1447,8 +1447,9 @@ LT_API int lt_torrent_forget_pieces(std::uint32_t id, std::int32_t const* pieces
   return n;
 }
 
-// Reset every uTP peer, and dial again the ones that have not dialled us back 2 s later. The shim
-// calls this when it has replaced the udp socket those peers rode on (library_fkn.js, attachUdp).
+// Reset every uTP peer we can dial back, and dial again the ones that have not dialled us back 2 s
+// later. The shim calls this when it has replaced the udp socket those peers rode on
+// (library_fkn.js, attachUdp).
 //
 // Nothing tells libtorrent the old socket is gone. Measured against transmission seeders through a
 // relay away for 20 s: each connection sat until uTP gave up on its resends (utp_num_resends 8, 196
@@ -1462,6 +1463,13 @@ LT_API int lt_torrent_forget_pieces(std::uint32_t id, std::int32_t const* pieces
 // dials us back at once, and a redial of ours in the same second crossed it in 1 of 5 runs: each
 // side kept a different one of the two connections, both were closed, and the bytes came back
 // 44.0 s after the relay. So the redial waits for the dial-back.
+//
+// A peer that dialled in over uTP is left alone: its source port is its listen port, so libtorrent
+// never marks it connectable (peer_list.cpp update_peer_port) and nothing would dial it back, while
+// its remote is still resending and the connection carries on by itself. Measured with our seed
+// behind the relay and a libtorrent leech that had dialled in: bytes again 2.3 to 4.3 s after the
+// relay left alone (5 runs), 62 to 63 s when it was cut and the leech waited out its own
+// min_reconnect_time.
 LT_API int lt_session_redial_utp_peers() {
   if (!g_session) return -1;
   boost::asio::post(*g_session->ioc, [] {
@@ -1473,13 +1481,14 @@ LT_API int lt_session_redial_utp_peers() {
       if (!t) continue;
       // copied, because a disconnect leaves the torrent's connection list
       std::vector<std::shared_ptr<lt::peer_connection>> utp;
-      for (auto* p : *t) if (lt::aux::is_utp(p->get_socket())) utp.push_back(p->self());
+      for (auto* p : *t) {
+        auto* peer = p->peer_info_struct();
+        if (lt::aux::is_utp(p->get_socket()) && peer && peer->connectable) utp.push_back(p->self());
+      }
       for (auto const& p : utp) {
         if (auto* s = boost::get<lt::aux::utp_stream>(&p->get_socket()); s && s->get_impl())
           s->get_impl()->send_reset(s->get_impl()->ack_nr());
-        // one that dialled in and never named its listen port cannot be dialled back
-        if (auto* peer = p->peer_info_struct(); peer && peer->connectable)
-          redial->push_back({t, p->remote().address(), peer});
+        redial->push_back({t, p->remote().address(), p->peer_info_struct()});
         p->disconnect(boost::asio::error::network_reset, lt::operation_t::sock_read);
       }
     }
