@@ -46,7 +46,8 @@ test('an ordinary peer that dialled in from 100.64.0.9 is no stream peer: the pe
   await Promise.all([streamPeer.connect(), inbound.connect()])
   await waitFor('both peers', () => session.status(handle)?.numPeers === 2)
 
-  const peers = (await session.peers(handle)).map((peer) => [peer.transport, peer.endpoint.replace(/:\d+$/, '')]).sort()
+  const peers = (await session.peers(handle)).map((peer) => [peer.transport, peer.endpoint.replace(/:\d+$/, '')])
+  peers.sort(([a], [b]) => a.localeCompare(b))
   assert.deepEqual(peers, [['tcp', INBOUND], ['webrtc', 'webrtc']])
 
   const reachable = session.reachable()
