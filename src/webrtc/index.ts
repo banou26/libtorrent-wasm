@@ -2,7 +2,10 @@ import { makeCertificate } from './certificate'
 import { Host, ipv4, MAX_MESSAGE_SIZE, RTCPeerConnection as PeerConnection, type Stack } from './connection'
 import { wasi } from './wasi'
 
-/** The part of a `node:dgram` socket this module drives. Node's own and @fkn/lib's both fit. */
+/**
+ * The part of a `node:dgram` socket this module drives. Node's own and @fkn/lib's both fit.
+ * A `message` may arrive while `send` is still running, as from a socket joined to it in memory.
+ */
 export interface DatagramSocket {
   send(data: Uint8Array, port: number, address: string, callback?: (error: Error | null) => void): void
   on(event: 'message', listener: (data: Uint8Array, remote: { address: string; port: number }) => void): unknown

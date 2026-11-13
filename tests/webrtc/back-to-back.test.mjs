@@ -13,8 +13,8 @@ import { socketPair } from './rig/memory-network.mjs'
 import { operations, traced } from './rig/trace.mjs'
 
 /** Two factories and a connection of each. They are closed when test `t` ends, passed or not. */
-async function facing(t) {
-  const sockets = socketPair()
+async function facing(t, options) {
+  const sockets = socketPair(options)
   const [A, B] = await Promise.all(
     sockets.map((socket) => createWebRTC({ socket, address: socket.address, port: socket.port, wasm, allowPrivateCandidates: true })),
   )
@@ -23,6 +23,26 @@ async function facing(t) {
     B.close()
   })
   return { A, B, sockets, a: new A.RTCPeerConnection(), b: new B.RTCPeerConnection() }
+}
+
+/**
+ * Fails unless each call that changes a connection was followed by polls until the stack had
+ * nothing more to say, before the next such call. `names` are calls the trace must have seen.
+ * Answers the calls of each of the two connections.
+ */
+function drained(calls, names) {
+  const all = operations(calls)
+  for (const name of names) {
+    assert.ok(all.some((operation) => operation.name === name), `the trace saw no ${name}, so it proves nothing about it`)
+  }
+  const connections = Map.groupBy(all, (operation) => operation.connection)
+  assert.equal(connections.size, 2)
+  for (const list of connections.values()) {
+    list.slice(0, -1).forEach((operation, at) => {
+      assert.ok(operation.drained, `${operation.name} was followed by ${list[at + 1].name} before the stack had nothing more to say`)
+    })
+  }
+  return connections
 }
 
 test('two factories with no network move 8 MiB each way, hashes equal', async (t) => {
@@ -85,28 +105,42 @@ test('every call into a connection is drained to the end before the next, and a 
   B.close()
   A.close()
 
-  const all = operations(calls)
-  const names = new Set(all.map((operation) => operation.name))
-  for (const name of ['rtc_open', 'rtc_accept_offer', 'rtc_accept_answer', 'rtc_receive', 'rtc_timeout', 'rtc_write', 'rtc_close_channel', 'rtc_close']) {
-    assert.ok(names.has(name), `the trace saw no ${name}, so it proves nothing about it`)
-  }
-  const connections = Map.groupBy(all, (operation) => operation.connection)
-  assert.equal(connections.size, 2)
+  const connections = drained(calls, ['rtc_open', 'rtc_accept_offer', 'rtc_accept_answer', 'rtc_receive', 'rtc_timeout', 'rtc_write', 'rtc_close_channel', 'rtc_close'])
   const described = []
   for (const [connection, list] of connections) {
     assert.ok(list.length > 20, `connection ${connection} made only ${list.length} calls`)
-    list.forEach((operation, at) => {
-      if (at === list.length - 1) return
-      const next = list[at + 1].name
-      assert.ok(operation.drained, `${operation.name} was followed by ${next} before the stack had nothing more to say`)
+    list.slice(0, -1).forEach((operation, at) => {
       // the first rtc_open of the offering side is the one that makes a description
-      if (operation.name.startsWith('rtc_accept_') || (operation.name === 'rtc_open' && at === 0)) {
-        described.push(operation.name)
-        assert.equal(next, 'rtc_timeout', `${operation.name} was followed by ${next}, not by the time`)
-      }
+      if (!operation.name.startsWith('rtc_accept_') && !(operation.name === 'rtc_open' && at === 0)) return
+      described.push(operation.name)
+      assert.equal(list[at + 1].name, 'rtc_timeout', `${operation.name} was followed by ${list[at + 1].name}, not by the time`)
     })
   }
   assert.deepEqual(described.sort(), ['rtc_accept_answer', 'rtc_accept_offer', 'rtc_open'])
+})
+
+test('close() called by a handler ends the drain it was called in before the stack hears of it', async (t) => {
+  const { calls, result } = await traced(() => facing(t))
+  const { a, b } = result
+  const [ours, theirs] = await pair(a, b)
+  // inside the drain of the datagram that carried the message
+  theirs.onmessage = () => b.close()
+  ours.send('close yourself')
+  await once(a, 'connectionstatechange', 5000)
+  assert.equal(a.connectionState, 'failed')
+  assert.equal(b.connectionState, 'closed')
+  drained(calls, ['rtc_receive', 'rtc_close'])
+})
+
+test('with sockets that deliver inside send(), every call is still drained to the end before the next', { timeout: 10_000 }, async (t) => {
+  const { calls, result } = await traced(() => facing(t, { inside: true }))
+  const { A, B, a, b } = result
+  const [ours, theirs] = await pair(a, b)
+  const arriving = receive(theirs, MiB)
+  const sent = await send(ours, MiB, 16384)
+  assert.equal((await arriving).sha256, sent)
+  assert.equal(A.droppedDatagrams + B.droppedDatagrams, 0)
+  drained(calls, ['rtc_open', 'rtc_accept_offer', 'rtc_accept_answer', 'rtc_receive', 'rtc_timeout', 'rtc_write'])
 })
 
 test('closing a connection tells the peer at once, and fires no connectionstatechange on the closer', async (t) => {
