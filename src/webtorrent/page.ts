@@ -173,7 +173,7 @@ export const pageLinks = (port: PortLike): Links => {
       onclose: null,
       accept: async sdp => post({ t: 'accept', id, sdp }),
       close: () => {
-        if (open.has(id)) post({ t: 'close', id })
+        post({ t: 'close', id })
         finish(id, false)
       },
     }
