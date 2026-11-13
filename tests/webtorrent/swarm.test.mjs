@@ -5,8 +5,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { LIMITS, rtcLinks, webtorrentPeers } from '../../build/webtorrent/index.js'
-import { advance, binary, fakeRtc, fakeWebSocket, FakeSession, hashOf, settle, TestTracker } from './fakes.mjs'
+import { LIMITS, pageLinks, rtcLinks, webtorrentPeers } from '../../build/webtorrent/index.js'
+import { servePeerLinks } from '../../build/webtorrent/page.js'
+import { advance, binary, fakeRtc, fakeWebSocket, FakeSession, hashOf, settle, TestTracker, until } from './fakes.mjs'
 
 const NOW = 1_700_000_000_000
 const TRACKER = 'wss://tracker.test/'
@@ -740,6 +741,46 @@ test('a remote whose channel is already closed when the engine first writes to i
   assert.deepEqual([r.peers.snapshot().torrents[0].silent, r.live()], [1, 0])
   await advance(t, 121 * SECOND, SECOND)
   assert.equal(await remote.connect(1), false)
+})
+
+// The browser's arrangement: the swarm in the engine worker, its connections made by the page half.
+test('through the page half a silent remote is told the same way, whichever end closed the channel', async t => {
+  const rtc = fakeRtc()
+  const { port1, port2 } = new MessageChannel()
+  const stop = servePeerLinks(port1, { RTCPeerConnection: rtc })
+  t.after(() => {
+    stop()
+    port1.close()
+    port2.close()
+  })
+  const r = rig(t, { rtc, links: pageLinks(port2) })
+  await r.start(1)
+  const silent = () => r.peers.snapshot().torrents[0].silent
+  /** A remote with an open channel to the swarm, and the stream the session was handed for it. */
+  const connected = async () => {
+    const remote = new Remote(r)
+    const handed = r.session.streams.length
+    const offer = await remote.offer(1)
+    await until('our answer', () => r.answers().some(message => message.offer_id === offer.offerId))
+    await remote.accept(offer)
+    await until('the stream is handed over', () => r.session.streams.length > handed)
+    return { remote, stream: r.session.streams[handed] }
+  }
+
+  const closing = await connected()
+  closing.remote.sockets[0].destroy()
+  await until('a remote that ended its channel without a byte is counted', () => silent() === 1)
+
+  const refusing = await connected()
+  await giveUp(refusing.stream)
+  await until('and one whose stream the engine gave up', () => silent() === 2)
+
+  const speaking = await connected()
+  speaking.remote.sockets[0].write(Buffer.of(19))
+  await until('its byte arrived', () => speaking.stream.bytes.length === 1)
+  speaking.remote.sockets[0].destroy()
+  await until('its channel closed', () => r.live() === 0)
+  assert.equal(silent(), 2, 'a remote that sent a byte is not')
 })
 
 test('a silent remote is still left alone after its torrent was paused and resumed', async t => {
