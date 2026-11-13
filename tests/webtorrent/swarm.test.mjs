@@ -157,14 +157,14 @@ test('the first announce carries no offers and makes no connection; offers follo
 // How long each class takes to have a description to send is its own (links.test.mjs has the cap). Nothing
 // is added to it: no beat, no interval, no timer of the swarm's.
 const DESCRIBING = [
-  ['that completes gathering at once', 'instant', 0],
-  ['that completes it one task later', 'task', 0],
-  ['whose reflexive candidate comes after 100 ms', { reflexiveMs: 100 }, 400],
-  ['that completes after 150 ms', { reflexiveMs: 100, completeMs: 150 }, 150],
-  ['that never completes', {}, 3000],
+  { name: 'that completes gathering at once', gathering: 'instant', ms: 0 },
+  { name: 'that completes it one task later', gathering: 'task', ms: 0 },
+  { name: 'whose reflexive candidate comes after 100 ms', gathering: { reflexiveMs: 100 }, ms: 400 },
+  { name: 'that completes after 150 ms', gathering: { reflexiveMs: 100, completeMs: 150 }, ms: 150 },
+  { name: 'that never completes', gathering: {}, ms: 3000 },
 ]
 
-for (const [name, gathering, ms] of DESCRIBING) {
+for (const { name, gathering, ms } of DESCRIBING) {
   test(`the first seconds, with a class ${name}: offers are on the wire ${ms} ms after the tracker’s first reply, and an answer ${ms} ms after an offer came`, async t => {
     const r = rig(t, { rtc: fakeRtc({ gathering }) })
     r.tracker.phantoms = { complete: 3, incomplete: 0 }
@@ -1195,7 +1195,7 @@ test('on the wire our peer id and every offer id are exactly 20 bytes, and every
       twenty(message.offer_id, 'the offer id an answer names')
     }
   }
-  assert.deepEqual([...kinds].sort(), ['answer', 'completed', 'offers', 'started', 'stopped'], 'every kind of frame was read')
+  assert.deepEqual(kinds, new Set(['started', 'offers', 'answer', 'completed', 'stopped']), 'every kind of frame was read')
   assert.equal(r.WebSocket.frames.filter(frame => JSON.parse(frame).offers?.length).flatMap(frame => JSON.parse(frame).offers).length, 6)
 })
 
