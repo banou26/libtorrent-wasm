@@ -416,6 +416,8 @@ export class FakeSession {
   /** Every stream handed over: { handle, socket, bytes: Buffer[], closed }. */
   streams = []
   ordinary = new Map()
+  /** How many times the ordinary peers were asked for. */
+  looks = 0
   dials = true
   refuses = false
   /** addPeerStream takes the stream and destroys it before it returns, as the engine does for a torrent it has not. */
@@ -470,6 +472,7 @@ export class FakeSession {
   }
 
   async peers(handle) {
+    this.looks++
     return this.ordinary.get(handle) ?? []
   }
 

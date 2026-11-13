@@ -626,12 +626,14 @@ test('a torrent leaves at most 200 remotes alone at a time, and forgets the olde
   assert.equal(await remotes[0].connect(1), true, 'the oldest was forgotten to make room')
 })
 
+/** A scripted peer whose channels come from that address. */
+const from = (r, address) => {
+  const remote = new Remote(r)
+  remote.links = rtcLinks({ RTCPeerConnection: fakeRtc({ address }) })
+  return remote
+}
+
 test('with the relay flag the address a silent remote came from is left alone too, under any id', async t => {
-  const from = (r, address) => {
-    const remote = new Remote(r)
-    remote.links = rtcLinks({ RTCPeerConnection: fakeRtc({ address }) })
-    return remote
-  }
   const r = rig(t, { relay: true })
   await r.start(1)
   assert.equal(await from(r, '198.51.100.7').connect(1), true)
@@ -702,24 +704,103 @@ test('a torrent that stopped between the answer and the open gets no channel', a
 })
 
 test('with the relay flag a channel whose remote address is already an ordinary peer is closed, and only then', async t => {
-  const rtc = fakeRtc({ address: '198.51.100.7' })
-  const r = rig(t, { rtc, relay: true })
+  const r = rig(t, { relay: true })
   await r.start(1)
-  r.session.ordinary.set(1, [{ endpoint: '198.51.100.7:51413' }])
-  const known = new Remote(r)
-  await known.connect(1)
-  assert.equal(r.session.streams.length, 0)
-  assert.equal(known.closes, 1)
+  r.session.ordinary.set(1, [{ endpoint: '198.51.100.7:51413' }, { endpoint: '[2001:db8::7]:6881' }])
+  for (const address of ['198.51.100.7', '2001:db8::7']) {
+    const known = from(r, address)
+    await known.connect(1)
+    assert.equal(r.session.streams.length, 0, `${address} is an ordinary peer`)
+    assert.equal(known.closes, 1)
+  }
+  assert.equal(await from(r, '198.51.100.8').connect(1), true)
+  assert.equal(r.session.streams.length, 1, 'an address no ordinary peer has is taken')
 
-  r.session.ordinary.set(1, [{ endpoint: '198.51.100.8:51413' }, { endpoint: '[2001:db8::7]:6881' }])
-  assert.equal(await new Remote(r).connect(1), true)
-  assert.equal(r.session.streams.length, 1)
-
-  const plain = rig(t, { rtc })
+  const plain = rig(t)
   await plain.start(1)
   plain.session.ordinary.set(1, [{ endpoint: '198.51.100.7:51413' }])
-  assert.equal(await new Remote(plain).connect(1), true)
+  assert.equal(await from(plain, '198.51.100.7').connect(1), true)
   assert.equal(plain.session.streams.length, 1, 'without the flag the address is not looked at')
+})
+
+test('with the relay flag an address that was an ordinary peer earlier in the session is closed too, a pause later as well', async t => {
+  const r = rig(t, { relay: true })
+  await r.start(1)
+  r.session.ordinary.set(1, [{ endpoint: '198.51.100.7:51413' }])
+  await advance(t, SECOND)
+  r.session.ordinary.set(1, [])
+  const refused = async (address, why) => {
+    const before = r.session.streams.length
+    const remote = from(r, address)
+    await remote.connect(1)
+    assert.deepEqual([r.session.streams.length - before, remote.closes], [0, 1], why)
+  }
+  await refused('198.51.100.7', 'it left, and its address is still not taken')
+  r.session.pause(1)
+  await settle()
+  r.session.resume(1)
+  await settle()
+  await refused('198.51.100.7', 'nor after the torrent was paused and resumed')
+  assert.equal(await from(r, '198.51.100.8').connect(1), true)
+  assert.equal(JSON.stringify(r.peers.snapshot()).includes('198.51.100'), false, 'what the swarm reports names no address')
+})
+
+test('with the relay flag a channel whose remote closed it while the ordinary peers were read is not handed over', async t => {
+  const r = rig(t, { relay: true })
+  await r.start(1)
+  let answer
+  r.session.peers = () => new Promise(resolve => { answer = resolve })
+  const remote = from(r, '198.51.100.7')
+  assert.equal(await remote.connect(1), true)
+  remote.sockets[0].destroy()
+  await settle()
+  answer([])
+  await settle()
+  assert.equal(r.session.streams.length, 0)
+})
+
+test('with the relay flag the ordinary peers of a torrent are read every 10 s, and never without it', async t => {
+  const r = rig(t, { relay: true })
+  await r.start(1)
+  await advance(t, 35 * SECOND, SECOND)
+  assert.equal(r.session.looks, 4, 'at 1, 11, 21 and 31 s')
+  const plain = rig(t)
+  await plain.start(1)
+  await advance(t, 35 * SECOND, SECOND)
+  assert.equal(plain.session.looks, 0)
+})
+
+test('a torrent remembers the addresses of 1000 ordinary peers, forgets the oldest first, and never one that is still there', async t => {
+  const BOUND = 1000
+  const address = i => `2001:db8::${(i + 1).toString(16)}`
+  const peer = i => ({ endpoint: `[${address(i)}]:6881` })
+  const r = rig(t, { relay: true })
+  await r.start(1)
+  const taken = async i => {
+    const before = r.session.streams.length
+    await from(r, address(i)).connect(1)
+    return r.session.streams.length > before
+  }
+
+  // Peer 0 first, then 999 more beside it: the torrent remembers exactly as many as it may.
+  r.session.ordinary.set(1, [peer(0)])
+  await advance(t, SECOND)
+  r.session.ordinary.set(1, Array.from({ length: BOUND }, (_, i) => peer(i)))
+  await advance(t, 10 * SECOND, SECOND)
+  assert.equal(r.session.looks, 2)
+
+  // One more appears while peer 0 is still there. Something has to go, and it is not peer 0.
+  r.session.ordinary.set(1, [peer(0), peer(BOUND)])
+  assert.equal(await taken(0), false, 'the oldest address is still an ordinary peer, so it is kept and refused')
+
+  // Ten more, and everybody leaves. With the bound gone the oldest would still be refused: this fails, nothing grows.
+  r.session.ordinary.set(1, Array.from({ length: 10 }, (_, i) => peer(BOUND + 1 + i)))
+  assert.equal(await taken(BOUND + 5), false)
+  r.session.ordinary.set(1, [])
+  assert.equal(await taken(1), true, 'the oldest that left is forgotten')
+  assert.equal(await taken(11), true, 'and so is the eleventh')
+  assert.equal(await taken(12), false, 'the twelfth is the oldest still remembered')
+  assert.equal(await taken(0), false, 'with the one that was still there')
 })
 
 test('a torrent is announced to its own ws and wss trackers and to the defaults, on one socket per tracker', async t => {

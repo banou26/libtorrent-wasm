@@ -66,6 +66,9 @@ const QUIET_AFTER_SILENCE_MS = 600_000
 /** Remotes one torrent leaves alone at a time. Past it the oldest is forgotten. */
 const MAX_QUIET = 200
 const QUIET_AFTER_FULL_MS = 60_000
+/** With `relay`: how often a torrent's ordinary peers are read, and how many of their addresses it remembers. */
+const ORDINARY_EVERY_MS = 10_000
+const MAX_ORDINARY = 1000
 /** Between announces until the tracker names its interval. */
 const ANNOUNCE_MS = 120_000
 const BEAT_MS = 1000
@@ -77,7 +80,10 @@ export type WebtorrentPeersOptions = {
   /** Announced for every torrent known not to be private, beside the torrent's own. None unless given. */
   trackers?: readonly string[]
   limits?: Partial<Limits>
-  /** The session also has ordinary peers: a channel whose remote address one of them already holds is closed. */
+  /**
+   * The session also has ordinary peers: a channel whose remote address is one of theirs, or was earlier in
+   * the session, is closed. Their addresses are read from `session.peers` and kept in memory only.
+   */
   relay?: boolean
 }
 
@@ -165,6 +171,8 @@ type Memory = {
   /** The torrent's tracker id: one for the whole session. */
   peerId: string
   quiet: Map<string, Quiet>
+  /** Where its ordinary peers are or were, with `relay`. */
+  ordinary: Set<string>
 }
 
 type Torrent = Memory & {
@@ -177,6 +185,8 @@ type Torrent = Memory & {
   leeching: boolean
   completed: boolean
   lastPeerAt: number | null
+  /** When its ordinary peers are read next. */
+  lookAt: number
 }
 
 /** The last announce has had neither a reply nor a refusal yet. */
@@ -198,8 +208,8 @@ const oursStands = (ourId: string, theirId: string): boolean => ourId < theirId
 
 const addressOf = (endpoint: string): string => endpoint.replace(/:\d+$/, '').replace(/^\[|\]$/g, '')
 
-/** Forgets the oldest entries past `max`. A Map keeps the order its keys were added in. */
-const trim = (kept: Map<string, unknown>, max: number) => {
+/** Forgets the oldest entries past `max`. A Map and a Set keep the order their keys were added in. */
+const trim = (kept: Map<string, unknown> | Set<string>, max: number) => {
   for (const key of kept.keys()) {
     if (kept.size <= max) return
     kept.delete(key)
@@ -321,14 +331,26 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     return true
   }
 
+  /** Reads where the torrent's ordinary peers are and remembers each, the ones still there as the newest. */
+  const look = async (t: Torrent) => {
+    t.lookAt = Date.now() + ORDINARY_EVERY_MS
+    for (const { endpoint } of (await session.peers?.(t.handle).catch(() => [])) ?? []) {
+      const address = addressOf(endpoint)
+      t.ordinary.delete(address)
+      t.ordinary.add(address)
+    }
+    trim(t.ordinary, MAX_ORDINARY)
+  }
+
   const opened = async (conn: Conn, socket: Stream) => {
     const t = conn.torrent
     const address = conn.address = relay ? links.remoteAddress(conn.link!) : undefined
     if (address) {
-      // libtorrent keeps one connection per address, and a libtorrent 2.1 remote refuses the channel anyway.
-      const ordinary = (await session.peers?.(t.handle).catch(() => [])) ?? []
+      await look(t)
       if (!t.conns.has(conn)) return
-      if (ordinary.some(peer => addressOf(peer.endpoint) === address)) return drop(conn)
+      // libtorrent keeps one connection per address, and a libtorrent 2.1 remote leaves the channel silent
+      // when its list holds our address, as it does once it was our ordinary peer.
+      if (t.ordinary.has(address)) return drop(conn)
       for (const quiet of t.quiet.values()) if (quiet.address === address) return drop(conn)
     }
     if (!conn.remote || !session.torrent(t.handle)?.running) return drop(conn)
@@ -518,11 +540,11 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       return
     }
     if (!t) {
-      const memory = memories.get(handle) ?? { peerId: peerId(), quiet: new Map() }
+      const memory = memories.get(handle) ?? { peerId: peerId(), quiet: new Map(), ordinary: new Set() }
       memories.set(handle, memory)
       t = {
         ...memory, handle, view, hash: binaryHash(view.infoHash), announcing: new Map(), conns: new Set(),
-        offers: new Map(), leeching: false, completed: false, lastPeerAt: null,
+        offers: new Map(), leeching: false, completed: false, lastPeerAt: null, lookAt: 0,
       }
       torrents.set(handle, t)
       byHash.set(t.hash, t)
@@ -579,6 +601,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
         t.quiet.delete(remote)
         if (silent) changed()
       }
+      if (relay && now >= t.lookAt) void look(t)
     }
     prune()
     announce()
