@@ -65,43 +65,66 @@ export const gatherCap: Gathered = ({ reflexive, complete }) => new Promise(reso
   void reflexive.then(() => { if (!settled) grace ??= setTimeout(done, REFLEXIVE_GRACE_MS) })
 })
 
+/**
+ * An `on` handler that is handed `E`. A method's type, which lets a handler written for a wider event fit: that
+ * is what makes the platform's own class fit the two shapes below.
+ */
+type Handler<E = unknown> = { handler(event: E): void }['handler'] | null
+
+type Description = { type: 'offer' | 'answer' | 'pranswer' | 'rollback', sdp?: string }
+
+type IceServer = { urls: string | string[], username?: string, credential?: string }
+
 /** The members of the platform's RTCDataChannel that `rtcLinks` uses. */
 export type DataChannelLike = {
   binaryType: string
   readonly readyState: string
   readonly bufferedAmount: number
   bufferedAmountLowThreshold: number
-  onopen: ((event: any) => void) | null
-  onmessage: ((event: any) => void) | null
-  onclose: ((event: any) => void) | null
-  onerror: ((event: any) => void) | null
-  onbufferedamountlow: ((event: any) => void) | null
-  send(data: any): void
+  onopen: Handler
+  onmessage: Handler<{ readonly data: unknown }>
+  onclose: Handler
+  onerror: Handler
+  onbufferedamountlow: Handler
+  send(data: ArrayBufferView): void
   close(): void
 }
 
-/** The members of the platform's RTCPeerConnection that `rtcLinks` uses. `sctp` may be absent. */
+/**
+ * The members of the platform's RTCPeerConnection that `rtcLinks` uses: the one shape a class has to have. The
+ * platform's own class, `RTCPeerConnection` of `@banou/ponyfill` and the class of `libtorrent-wasm/webrtc` each
+ * fit it as they are.
+ */
 export type PeerConnectionLike = {
-  readonly localDescription: { sdp: string } | null
+  readonly localDescription: { readonly sdp: string } | null
   readonly iceGatheringState: string
   readonly connectionState: string
-  readonly sctp?: any
-  onicecandidate: ((event: any) => void) | null
-  onicegatheringstatechange: ((event: any) => void) | null
-  onconnectionstatechange: ((event: any) => void) | null
-  ondatachannel: ((event: any) => void) | null
+  /**
+   * May be absent, and is null until a description is set. `maxMessageSize` caps a message, and the selected
+   * pair's remote address is what `remoteAddress` answers: null until ICE has chosen a pair.
+   */
+  readonly sctp?: {
+    readonly maxMessageSize: number
+    readonly transport: {
+      readonly iceTransport: { getSelectedCandidatePair(): { readonly remote: { readonly address: string | null } } | null }
+    }
+  } | null
+  onicecandidate: Handler<{ readonly candidate: { readonly candidate?: string } | null }>
+  onicegatheringstatechange: Handler
+  onconnectionstatechange: Handler
+  ondatachannel: Handler<{ readonly channel: DataChannelLike }>
   createDataChannel(label: string): DataChannelLike
-  createOffer(): Promise<any>
-  createAnswer(): Promise<any>
-  setLocalDescription(description: any): Promise<void>
-  setRemoteDescription(description: any): Promise<void>
+  createOffer(): Promise<Description>
+  createAnswer(): Promise<Description>
+  setLocalDescription(description: Description): Promise<void>
+  setRemoteDescription(description: Description): Promise<void>
   close(): void
 }
 
 export type RtcLinksOptions = {
   /** The browser's own class, or any class with its shape. */
-  RTCPeerConnection: new (configuration: { iceServers: any[] }) => PeerConnectionLike
-  iceServers?: any[]
+  RTCPeerConnection: new (configuration: { iceServers: IceServer[] }) => PeerConnectionLike
+  iceServers?: IceServer[]
 }
 
 type Step = <T>(taken: Promise<T>) => Promise<T>
@@ -205,7 +228,7 @@ export const rtcLinks = ({ RTCPeerConnection, iceServers = [] }: RtcLinksOptions
     const opened = () => {
       if (stream || closed) return
       // The limit is the remote description's, so it is only there to read once that is set.
-      const limit = pc.sctp?.maxMessageSize
+      const limit = pc.sctp?.maxMessageSize ?? 0
       if (limit > 0 && limit < SLICE) slice = limit
       stream = new Stream({
         write: bytes => {
@@ -302,6 +325,6 @@ export const rtcLinks = ({ RTCPeerConnection, iceServers = [] }: RtcLinksOptions
       await step(pc.setLocalDescription(await step(pc.createAnswer())))
     }),
     remoteAddress: link =>
-      connections.get(link)?.sctp?.transport?.iceTransport?.getSelectedCandidatePair?.()?.remote?.address || undefined,
+      connections.get(link)?.sctp?.transport.iceTransport.getSelectedCandidatePair()?.remote.address || undefined,
   }
 }
