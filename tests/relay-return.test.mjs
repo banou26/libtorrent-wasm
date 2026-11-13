@@ -108,7 +108,8 @@ describe('a relay that comes back after 22 s', { concurrency: true }, () => {
     await resumed(await outage(OUTAGE_MS))
   })
 
-  it('a download behind it moves again within 10 s of its return when it went away again 1 s after the first', async (t) => {
+  // two outages take 63 s, past the 60 s the suite gives a test
+  it('a download behind it moves again within 10 s of its return when it went away again 1 s after the first', { timeout: 120_000 }, async (t) => {
     const { relayed, outage, resumed } = await swarm(t, 'leech')
     const first = await outage(OUTAGE_MS)
     await relayed.next('both sockets back', (r) => r.at > first.back.restoreAt && r.listeners.every((l) => l.up), 16)
