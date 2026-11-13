@@ -58,8 +58,9 @@ export const binary = hex => Buffer.from(hex, 'hex').toString('latin1')
 export class TestTracker {
   sockets = new Set()
   swarms = new Map()
-  /** Every message received, parsed, oldest first. */
+  /** Every message received, parsed, oldest first, and when each came by `Date.now()`. */
   received = []
+  receivedAt = []
   interval = 120
   /** Peers added to the counts that are not really there. */
   phantoms = { complete: 0, incomplete: 0 }
@@ -74,6 +75,7 @@ export class TestTracker {
   receive(socket, data) {
     const message = JSON.parse(data)
     this.received.push(message)
+    this.receivedAt.push(Date.now())
     if (message.answer) {
       this.swarms.get(message.info_hash)?.get(message.to_peer_id)?.socket.deliver({
         action: 'announce', info_hash: message.info_hash, peer_id: message.peer_id,

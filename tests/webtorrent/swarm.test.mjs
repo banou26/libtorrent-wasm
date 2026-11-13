@@ -154,6 +154,47 @@ test('the first announce carries no offers and makes no connection; offers follo
   assert.equal(new Set(second.offers.map(offer => offer.offer_id)).size, 5)
 })
 
+// How long each class takes to have a description to send is its own (links.test.mjs has the cap). Nothing
+// is added to it: no beat, no interval, no timer of the swarm's.
+const DESCRIBING = [
+  ['that completes gathering at once', 'instant', 0],
+  ['that completes it one task later', 'task', 0],
+  ['whose reflexive candidate comes after 100 ms', { reflexiveMs: 100 }, 400],
+  ['that completes after 150 ms', { reflexiveMs: 100, completeMs: 150 }, 150],
+  ['that never completes', {}, 3000],
+]
+
+for (const [name, gathering, ms] of DESCRIBING) {
+  test(`the first seconds, with a class ${name}: offers are on the wire ${ms} ms after the tracker’s first reply, and an answer ${ms} ms after an offer came`, async t => {
+    const r = rig(t, { rtc: fakeRtc({ gathering }) })
+    r.tracker.phantoms = { complete: 3, incomplete: 0 }
+    /** Lets the time a description takes pass, and says whether `sent()` was there a millisecond before the end. */
+    const early = async sent => {
+      if (ms) await advance(t, ms - 1, 1)
+      await settle()
+      const before = sent()
+      if (ms) await advance(t, 1, 1)
+      await settle()
+      return ms > 0 && before
+    }
+    const sentAt = message => r.tracker.receivedAt[r.tracker.received.indexOf(message)]
+
+    await r.start(1)
+    const [first] = r.plain(1)
+    assert.equal(await early(() => r.offered(1).length > 0), false)
+    assert.equal(r.offered(1)[0]?.offers.length, 3)
+    assert.equal(sentAt(r.offered(1)[0]) - sentAt(first), ms, 'the tracker answered in the millisecond it was asked')
+
+    // Its own description is made beforehand, by a class that takes no time.
+    const remote = new Remote(r, undefined, fakeRtc())
+    const came = Date.now()
+    await remote.offer(1)
+    assert.equal(await early(() => r.answers().length > 0), false)
+    assert.equal(r.answers().length, 1)
+    assert.equal(sentAt(r.answers()[0]) - came, ms)
+  })
+}
+
 test('a swarm with nobody else in it costs no connection at all', async t => {
   const r = rig(t)
   await r.start(1)
