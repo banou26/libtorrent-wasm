@@ -27,7 +27,10 @@ export interface WebRTCOptions {
    */
   address: string
   port: number
-  /** The module's wasm: its bytes, a compiled module, or where to fetch it. Defaults to `webrtc.wasm` beside this file. */
+  /**
+   * The module's wasm: its bytes, a compiled module, or where to fetch it. Defaults to
+   * `webrtc.wasm` beside this file, fetched. Node's `fetch` reads no file, so node passes the bytes.
+   */
   wasm?: BufferSource | WebAssembly.Module | URL | string
   /**
    * Keep the remote candidates that are dropped by default: every one whose address is not a

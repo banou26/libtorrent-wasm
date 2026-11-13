@@ -499,7 +499,8 @@ webrtc.close()
 It runs on one thread, in a page, a worker or node, and needs no cross-origin
 isolation. It imports nothing: not `@fkn/lib`, not a node module, and nothing of
 the engine. The wasm is fetched from beside the module; a bundler that moves
-files passes it as `wasm` (`libtorrent-wasm/webrtc.wasm` resolves to it).
+files passes it as `wasm` (`libtorrent-wasm/webrtc.wasm` resolves to it). So
+does node, whose `fetch` reads no file: there `wasm` is the file's bytes.
 
 ### What it stands in for
 
