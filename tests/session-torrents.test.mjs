@@ -56,3 +56,31 @@ test('isPrivate() says what the metadata says, and nothing while there is none',
   assert.equal(session.isPrivate(magnet), undefined, 'a magnet has no metadata to ask')
   assert.equal(session.isPrivate(77), undefined)
 })
+
+test('hasStreamWindow() is true from a window that was planned until it is cleared, replaced or the torrent goes', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const { session, running } = await startEngine(defer, path.join(fx.root, 'engine'))
+  const handle = await running(session.addTorrentFile(fx.meta.torrent, '/dl'))
+  await waitFor('the file layout', () => session.files(handle))
+  const window = () => session.setStreamWindow(handle, [{ fileIndex: 0, offset: 0 }])
+  assert.equal(session.hasStreamWindow(handle), false)
+
+  assert.equal(session.setStreamWindow(handle, [{ fileIndex: 9, offset: 0 }]), false, 'a file the torrent does not have was planned')
+  assert.equal(session.hasStreamWindow(handle), false)
+  assert.equal(window(), true)
+  assert.equal(session.hasStreamWindow(handle), true)
+
+  session.clearStreamWindow(handle)
+  assert.equal(session.hasStreamWindow(handle), false)
+
+  window()
+  session.prioritizeRange(handle, 0, 0, 1000)
+  assert.equal(session.hasStreamWindow(handle), false, 'a range that replaced the window left it standing')
+
+  window()
+  session.removeTorrent(handle)
+  assert.equal(session.hasStreamWindow(handle), false)
+  assert.equal(session.addTorrentFile(fx.meta.torrent, '/dl'), handle)
+  assert.equal(session.hasStreamWindow(handle), false, 'a torrent added again kept the window of the one removed')
+})

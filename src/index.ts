@@ -591,6 +591,7 @@ export class Session {
   // a random start, so a session does not hand out the addresses the one before it did
   private nextStream = Math.floor(Math.random() * STREAM_ADDRESSES)
   private handles = new Set<number>()
+  private windows = new Set<number>()
 
   // `listeners` and `portOpen` are never stored: reachable() derives them from the shim on every
   // read, because they are the two fields that go stale on their own
@@ -673,6 +674,7 @@ export class Session {
     // before the bitfield goes, or a parked read can never be satisfied and never rejected either
     this.failPieceWaiters(new Error(`read: torrent ${handle} was removed`), handle)
     this.handles.delete(handle)
+    this.windows.delete(handle)
     this.filesByHandle.delete(handle)
     this.bitfieldByHandle.delete(handle)
     this.statusByHandle.delete(handle)
@@ -955,11 +957,20 @@ export class Session {
     // the clear above took the in-flight reads' deadlines with it
     this.reissueReadDeadlines(handle)
     if (opts.sequential !== false) this.setSequential(handle, true)
+    this.windows.add(handle)
     return true
   }
 
+  /**
+   * Whether the torrent has a stream window: true from a {@link setStreamWindow} that planned one
+   * until {@link clearStreamWindow}, {@link prioritizeRange}, which replaces it, or the torrent's
+   * removal. It is how anything beside the caller learns that somebody is reading the torrent now.
+   */
+  hasStreamWindow(handle: number): boolean { return this.windows.has(handle) }
+
   /** Drop the streaming window: no deadlines, every piece back to normal, sequential off. */
   clearStreamWindow(handle: number) {
+    this.windows.delete(handle)
     this.mod._lt_torrent_clear_piece_deadlines(handle)
     const layout = this.filesByHandle.get(handle)
     // not optional: clearing deadlines leaves those pieces at priority 1, below default
@@ -988,6 +999,7 @@ export class Session {
     // leaves everything past its end untouched at whatever the previous call set
     const prios = new Uint8Array(numPieces).fill(PRIORITY.normal)
     for (let p = p0; p <= p1; p++) prios[p] = PRIORITY.top
+    this.windows.delete(handle)
     this.mod._lt_torrent_clear_piece_deadlines(handle)
     this.prioritizePieces(handle, prios)
     for (let p = p0; p <= p1; p++) this.mod._lt_torrent_set_piece_deadline(handle, p, (p - p0) * DEFAULT_DEADLINE_STEP_MS, 0)
