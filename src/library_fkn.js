@@ -377,7 +377,6 @@ addToLibrary({
           data: copy,
           address: rinfo.address, port: rinfo.port, family: rinfo.family,
         })
-        st.reopenAttempts = 0
         FKN.scheduleTick()
         FKN._dbgJsBusyUs += (performance.now() - _t0) * 1000
         FKN._dbgJsHandlerCalls++
@@ -395,6 +394,8 @@ addToLibrary({
         const a = sock.address()
         st.localAddr = a.address; st.localPort = a.port; st.localFamily = a.family
         if (st.homePort == null) st.homePort = a.port
+        // a healed socket starts its backoff over, so a later drop is not punished for this one
+        st.reopenAttempts = 0
         if (st.outageAt != null) {
           // healed: the uTP peers rode the socket this one replaces
           if (Date.now() - st.outageAt > FKN.REDIAL_AFTER_MS) Module._lt_session_cut_utp_peers?.()

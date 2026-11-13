@@ -104,7 +104,7 @@ test('error and close together only produce one replacement', async () => {
   await new Promise((resolve) => setTimeout(resolve, 400))
 
   assert.equal(dgram.sockets.length, 2, 'the three events are one outage, not three')
-  assert.equal(st.reopenAttempts, 1)
+  assert.equal(FKN.stats.udpReopen, 1)
   settled(st)
 })
 
@@ -170,26 +170,18 @@ test('a udp fd is not writable while its socket is being replaced, in poll and i
   assert.deepEqual(writable(), [true, true], 'the replacement socket is not writable')
 })
 
-test('repeated failures back off, and traffic resets the schedule', async () => {
+test('a socket back up starts its backoff over, though no datagram has come in', async () => {
   const dgram = makeDgram()
   const { FKN } = loadShim(dgram)
   const st = boundUdpState(FKN)
 
-  st.socket.emit('close')
-  await new Promise((resolve) => setTimeout(resolve, 400))
-  assert.equal(st.reopenAttempts, 1)
-
-  st.socket.emit('close')
-  await new Promise((resolve) => setTimeout(resolve, 400))
-  // 400 is chosen against UDP_REOPEN_DELAYS[1] = 1000: the second delay is a full second, so nothing has been rebuilt yet at 400ms, and changing the delay table breaks this assertion
-  assert.equal(st.reopenAttempts, 2)
-  assert.equal(dgram.sockets.length, 2, 'the second attempt waits longer than the first')
-
-  await new Promise((resolve) => setTimeout(resolve, 900))
-  assert.equal(dgram.sockets.length, 3)
-
-  st.socket.emit('message', new Uint8Array([1, 2, 3]), { address: '1.2.3.4', port: 6881, family: 'IPv4' })
-  assert.equal(st.reopenAttempts, 0)
+  for (let outage = 1; outage <= 2; outage++) {
+    st.socket.emit('close')
+    // 400 against UDP_REOPEN_DELAYS: the first reopen of an outage comes after 250 ms, a second one after 1 s
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    assert.equal(dgram.sockets.length, outage + 1, `outage ${outage} was not reopened after 250 ms`)
+    assert.equal(st.reopenAttempts, 0)
+  }
   settled(st)
 })
 
