@@ -62,19 +62,6 @@ const SEND_QUEUE_LIMIT = 16 * 1024 * 1024
  */
 const MAX_BURST = 128
 
-/**
- * Goes up in a task of its own each time a host that has handed its socket a datagram asks,
- * so a host that reads another number than it noted is in a later task. The task is a message
- * to itself, which a page does not hold back as it does a timer.
- */
-let task = 0
-const nextTask = new MessageChannel()
-nextTask.port1.onmessage = () => {
-  task++
-}
-// node waits for a port that listens before it exits
-;(nextTask.port1 as { unref?: () => void }).unref?.()
-
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const ignore = () => {}
@@ -156,8 +143,12 @@ export class Host {
   /** Datagrams handed to the socket since `#turned`, on the clock of `performance.now()`. */
   #burst = 0
   #turned = 0
-  /** The `task` in which the socket was last handed a datagram. */
-  #spent = -1
+  /**
+   * The socket has been handed a datagram and the microtasks have not run since. They run when
+   * a task's own code is over, so this is "in this task" for a socket that delivers its
+   * datagrams from a task, as node's and @fkn/lib's do.
+   */
+  #spent = false
   /** Datagrams that wait for a later millisecond, oldest first: at most what the stack has in flight. */
   #held: [Uint8Array, number, string][] = []
   #timer: ReturnType<typeof setTimeout> | undefined
@@ -188,9 +179,11 @@ export class Host {
   transmit(data: Uint8Array, port: number, address: string) {
     if (this.closed || this.#burst < MAX_BURST) {
       this.#burst++
-      if (this.#spent !== task) {
-        this.#spent = task
-        nextTask.port2.postMessage(0)
+      if (!this.#spent) {
+        this.#spent = true
+        queueMicrotask(() => {
+          this.#spent = false
+        })
       }
       this.socket.send(data, port, address, ignore)
     } else {
@@ -262,7 +255,7 @@ export class Host {
   }
 
   receive = (data: Uint8Array, remote: { address: string; port: number }) => {
-    if (this.#spent !== task) this.#turn()
+    if (!this.#spent) this.#turn()
     const key = `${remote.address}:${remote.port}`
     let route = this.routes.get(key)
     if (!route) {
