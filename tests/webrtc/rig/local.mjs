@@ -74,14 +74,14 @@ export async function connect(pc, remote, { offer, label = 'test' }) {
     await pc.setLocalDescription()
     remote.send({ t: 'remote', ...(await gathered(pc)) })
     await pc.setRemoteDescription(await remote.next('description'))
-    await within(opened, 30_000, 'both descriptions are set and our channel did not open in 30 s')
+    await within(Promise.race([opened, remote.died]), 30_000, 'both descriptions are set and our channel did not open in 30 s')
   } else {
     const announced = heard(pc, 'datachannel')
     remote.send({ t: 'offer', label })
     await pc.setRemoteDescription(await remote.next('description'))
     await pc.setLocalDescription()
     remote.send({ t: 'remote', ...(await gathered(pc)) })
-    channel = (await within(announced, 30_000, 'the remote was sent our answer and announced no channel in 30 s')).channel
+    channel = (await within(Promise.race([announced, remote.died]), 30_000, 'the remote was sent our answer and announced no channel in 30 s')).channel
   }
   const opened = await remote.next('open')
   return { channel, opened }
