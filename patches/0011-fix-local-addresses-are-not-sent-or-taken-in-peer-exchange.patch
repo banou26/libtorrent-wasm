@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Banou <me@banou.dev>
+Date: Fri, 13 Nov 2026 06:00:00 +0900
+Subject: [PATCH] fix: local addresses are not sent or taken in peer exchange
+
+---
+diff --git a/src/ut_pex.cpp b/src/ut_pex.cpp
+index 957a6f27e..3ac638f09 100644
+--- a/src/ut_pex.cpp
++++ b/src/ut_pex.cpp
+@@ -137,6 +137,8 @@ namespace libtorrent { namespace {
+ 				if (!send_peer(*peer)) continue;
+ 
+ 				tcp::endpoint remote = peer->remote();
++				// WASM patch: an address on a local network means nothing to a peer outside it
++				if (aux::is_local(remote.address())) continue;
+ 				m_old_peers.insert(remote);
+ 
+ 				auto const di = dropped.find(remote);
+@@ -345,8 +347,10 @@ namespace libtorrent { namespace {
+ 					if (int(m_peers.size()) >= m_torrent.settings().get_int(settings_pack::max_pex_peers))
+ 						break;
+ 
+-					// ignore local addresses unless the peer is local to us
+-					if (aux::is_local(adr.address()) && !aux::is_local(m_pc.remote().address())) continue;
++					// WASM patch: ignore local addresses whoever names them. Upstream takes them from
++					// a peer that is local itself, which a peer on a made-up stream address looks
++					// like, and the engine can dial no local address anyway.
++					if (aux::is_local(adr.address())) continue;
+ 
+ 					peers4_t::value_type const v(adr.address().to_v4().to_bytes(), adr.port());
+ 					auto const j = std::lower_bound(m_peers.begin(), m_peers.end(), v);
+@@ -520,6 +524,8 @@ namespace libtorrent { namespace {
+ 			for (auto const peer : m_torrent)
+ 			{
+ 				if (!send_peer(*peer)) continue;
++				// WASM patch: an address on a local network means nothing to a peer outside it
++				if (aux::is_local(peer->remote().address())) continue;
+ 
+ 				// don't write too big of a package
+ 				if (num_added >= max_peer_entries) break;

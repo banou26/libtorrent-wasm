@@ -5,6 +5,7 @@
 import crypto from 'node:crypto'
 import net from 'node:net'
 
+import { bdecode } from './make-torrent.mjs'
 import { PROTOCOL } from './peer-handshake.mjs'
 
 const MSG = {
@@ -43,6 +44,8 @@ export class ScriptedPeer {
   dontHave = []
   /** The bencoded payload of every ut_pex message the engine sent. */
   pex = []
+  /** The id the engine reads ut_pex under, null until its extension handshake has arrived. */
+  enginePexId = null
   #socket = null
   #serve
 
@@ -104,6 +107,20 @@ export class ScriptedPeer {
     this.#socket.write(frame(MSG.piece, Buffer.concat([u32s(piece, offset), data])))
   }
 
+  /** Names peers to the engine in a ut_pex message, as IPv4 `address:port` strings. */
+  sendPex(added) {
+    const compact = Buffer.concat(added.map((endpoint) => {
+      const [address, port] = endpoint.split(':')
+      return Buffer.from([...address.split('.').map(Number), port >> 8, port & 0xff])
+    }))
+    this.#socket.write(frame(MSG.extended, Buffer.concat([
+      Buffer.from([this.enginePexId]),
+      Buffer.from(`d5:added${compact.length}:`), compact,
+      Buffer.from(`7:added.f${added.length}:`), Buffer.alloc(added.length),
+      Buffer.from('e'),
+    ])))
+  }
+
   close() {
     this.#socket?.destroy()
     this.#socket = null
@@ -113,6 +130,8 @@ export class ScriptedPeer {
     if (id === MSG.unchoke) this.unchoked = true
     else if (id === MSG.reject) {
       this.rejects.push({ piece: payload.readUInt32BE(0), offset: payload.readUInt32BE(4), length: payload.readUInt32BE(8) })
+    } else if (id === MSG.extended && payload[0] === 0) {
+      this.enginePexId = bdecode(payload.subarray(1)).m?.ut_pex ?? null
     } else if (id === MSG.extended && payload[0] === DONT_HAVE_ID) {
       this.dontHave.push(payload.readUInt32BE(1))
     } else if (id === MSG.extended && payload[0] === PEX_ID) {

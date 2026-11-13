@@ -253,4 +253,4 @@ rerun `make apply-patches`; rejected hunks must be reconciled manually.
 | 0008 | The uTP receive buffer capacity is a session-wide runtime setting. |
 | 0009 | A late time-critical piece is rescued before the first one completes. |
 | 0010 | `forget_pieces`, for a streaming storage that dropped a piece's bytes. |
-| 0011 | Peer exchange does not send local addresses, which mean nothing to a peer outside that network. That covers the addresses `addPeerStream` makes up. |
+| 0011 | Peer exchange neither sends local addresses, which mean nothing to a peer outside that network, nor takes them from a peer. That covers the addresses `addPeerStream` makes up, and the local addresses a stream peer could otherwise name for the engine to dial. |
