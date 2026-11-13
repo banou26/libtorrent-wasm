@@ -19,7 +19,7 @@ src/           # the WASM port itself
   opfs.ts            - StorageBackend impl backed by the OPFS
   types.ts           - shared TS types
   webtorrent/        - WebRTC peers through WebSocket trackers (two optional entries, no wasm)
-src/webrtc/    # the optional ./webrtc entry: an RTCPeerConnection over a UDP socket the caller owns
+  webrtc/            - the optional ./webrtc entry: an RTCPeerConnection over a UDP socket the caller owns
 webrtc/        # that entry's stack: a Rust crate around str0m, built by cargo for wasm32-wasip1
 src/app/       # browser harness with diagnostic pages
 dist/          # emcc output (gitignored)
@@ -277,6 +277,12 @@ a peer. The engine itself does not import them, and neither carries any wasm.
 | `libtorrent-wasm/webtorrent` | the engine worker | the tracker client, the swarm's rules, and the links to a WebRTC implementation |
 | `libtorrent-wasm/webtorrent/page` | the page that owns the worker | makes the browser's peer connections for the worker and carries their bytes over one `MessagePort` |
 
+One swarm serves two modes, and a session is in one of them. With no relay behind it, [the direct
+mode](#the-direct-mode): every peer is a WebRTC peer, and the connections are the browser's own. Behind the
+relay, [the relay mode](#the-relay-mode): WebRTC peers beside the ordinary ones, over a third optional entry,
+[`libtorrent-wasm/webrtc`](#webrtc-over-a-socket-you-own-libtorrent-wasmwebrtc), a WebRTC stack of the
+package's own.
+
 ### The direct mode
 
 A session with no relay behind it, whose peers are all WebRTC peers. Three parts, each of which the caller
@@ -340,20 +346,134 @@ What `peers.snapshot()` tells an interface, for each running torrent (`torrents[
 So "no peers yet, still searching" is a torrent whose trackers have answered, with `open` at 0 and `lastPeerAt`
 null, and it is taken back when `open` rises. `onchange` fires after any of it changed.
 
-### With a WebRTC stack in the worker
+### The relay mode
 
-The same signalling drives a class that lives in the worker directly:
+A session behind the relay keeps its ordinary peers and takes WebRTC peers beside them: the same swarm, in the
+same worker, over a WebRTC stack whose every packet leaves through the relay. Nothing of it is in the page. Four
+parts, each of which the caller wires: the ordinary session; one more UDP socket of its host; the class of
+[`libtorrent-wasm/webrtc`](#webrtc-over-a-socket-you-own-libtorrent-wasmwebrtc) over that socket; and the swarm
+with `relay` over that class.
 
 ```js
+// the engine worker
+import net from '@fkn/lib/net'
+import dgram from '@fkn/lib/dgram'
+import { WebSocket } from '@fkn/lib/websocket'
+import { createSession } from 'libtorrent-wasm'
+import { createWebRTC } from 'libtorrent-wasm/webrtc'
 import { webtorrentPeers, rtcLinks, DEFAULT_TRACKERS } from 'libtorrent-wasm/webtorrent'
 
-webtorrentPeers(session, {
-  links: rtcLinks({ RTCPeerConnection: StackPeerConnection }),
-  WebSocket: RelayWebSocket,
+const session = await createSession({ net, dgram, storage })   // as without WebRTC: TCP, uTP, the DHT
+
+// one UDP socket for every WebRTC connection, apart from the engine's own
+const bound = () => new Promise((resolve, reject) => {
+  const socket = dgram.createSocket('udp4')
+  socket.once('listening', () => resolve(socket))
+  socket.once('error', reject)
+  socket.bind(0)
+})
+
+const socket = await bound()
+// address: the relay's public IPv4 address, which the socket does not know. With the port it is the one
+// candidate of every description, so no STUN host is asked.
+const webrtc = await createWebRTC({ socket, address, port: socket.address().port })
+const peers = webtorrentPeers(session, {
+  links: rtcLinks({ RTCPeerConnection: webrtc.RTCPeerConnection }),
+  WebSocket,                    // the platform's shape, opened through the relay
   trackers: DEFAULT_TRACKERS,
   relay: true,
 })
 ```
+
+The pump and `peers.snapshot()` are the direct mode's. What differs:
+
+| | the direct mode | the relay mode |
+| --- | --- | --- |
+| the session | on `offlineHost()`, with no DHT and no listen port | the ordinary one: its TCP, uTP and DHT peers stay, and a torrent takes pieces from both kinds |
+| where a connection is made | in the page, by the platform's class or the ponyfill's (`servePeerLinks`) | in the worker, by the class of `libtorrent-wasm/webrtc` |
+| `links` | `pageLinks(port)` | `rtcLinks({ RTCPeerConnection })` |
+| our candidates | what the browser gathers, with the STUN host that was passed | one: the relay's public address and the socket's port. No STUN host, so `iceServers` is left out |
+| a remote's candidates | all | public IPv4 addresses only: the rest never reach the stack, since a relay refuses a datagram to them |
+| `WebSocket` | the platform's | a constructor of the platform's shape whose sockets go through the relay (`WebSocket` of `@fkn/lib/websocket`) |
+| who sees the person's address | each tracker, the STUN host and every peer | none of them: they see the relay's |
+| `relay` | left out | `true`: a channel whose remote address is an ordinary peer of the torrent, or was one earlier in the session, is closed before libtorrent hears of it |
+| a magnet that names no `ws` tracker | finds nobody | gets its metadata from its ordinary peers, and is announced to the passed trackers once it is known not to be private |
+| when the socket ends | nothing to do: the browser's connections are the page's | the factory ends with it: make both again ([below](#when-the-relay-goes-away-in-the-relay-mode)) |
+
+Its limits:
+
+- **It is for browser peers.** A libtorrent 2.1 peer (qBittorrent) takes one WebRTC connection per address, and
+  behind a relay that address is everybody's on it; it takes none from an address it holds as an ordinary peer.
+  Two of our sessions behind one address against one 2.1 seed (the rig below, 3 runs): the first held its
+  channel and downloaded over it; the second's channel opened and ended without a byte from the 2.1 peer, was
+  counted `silent`, and nothing more was made with that peer through its next two announces (135 s). Such a
+  peer is reached over TCP or uTP all the same, and the second session also took the file from the first, over
+  a channel between the two.
+- **One connection at a time between two sessions that both use this stack.** Two connections between one pair
+  of sockets cannot be told apart, so a second torrent the two share connects once the first torrent's
+  connection is gone, or is given up after 30 s and tried again at a later announce.
+- **IPv4 only**, since the candidate is one IPv4 address.
+- **An upload is held to the stack's send buffer for each round trip**: 4.64 to 4.79 MiB/s to a libtorrent 2.1
+  peer over 50 ms with the default of 256 KiB (10 runs through the swarm), 10.5 to 12.4 with 4 MiB (10 runs).
+  `sendBufferSize` of `createWebRTC` sets it for a whole factory.
+- **What the swarm remembers goes with it**: the remotes that stayed silent and where the ordinary peers were.
+
+Measured in the libtorrent 2.1 rig (the 2.1.1 wheel in private network namespaces, our session over real
+sockets, the WebRTC entry's class and the swarm with `relay`, as above; 2026-11-14): 20 MiB down from a 2.1
+seed to a magnet and 20 MiB up to a 2.1 magnet leecher, SHA-256 equal in 4 runs of 4 each, carried by the
+channel alone, with the relay rule reading the 2.1 peer's address from the selected pair. 256 MiB up over 50 ms
+of round trip: 10 runs of 10 complete on one channel with no early end, and the socket was handed at most 128
+datagrams in a task and 193 within a millisecond; with the send buffer at 4 MiB, 10 of 10 again, 128 in a task
+and 256 within a millisecond. With a session that takes no stream, both transfers fail.
+
+#### When the relay goes away, in the relay mode
+
+The engine heals its own sockets ([above](#when-the-relay-goes-away)). The WebRTC socket is the caller's, and
+the factory ends with it: every connection fails at once and no new one is made. So when that socket closes,
+close the swarm and the factory, and make both again on a new socket, on any port:
+
+```js
+for (;;) {
+  const socket = await bound().catch(() => null)             // refused while the relay is away
+  if (!socket) { await new Promise((resolve) => setTimeout(resolve, 500)); continue }
+  const closed = new Promise((resolve) => socket.once('close', resolve))
+  const webrtc = await createWebRTC({ socket, address, port: socket.address().port, wasm })
+  const peers = webtorrentPeers(session, {
+    links: rtcLinks({ RTCPeerConnection: webrtc.RTCPeerConnection }), WebSocket, trackers: DEFAULT_TRACKERS, relay: true,
+  })
+  await closed
+  peers.close()
+  webrtc.close()
+}
+```
+
+With `wasm` passed as a compiled `WebAssembly.Module`, a new factory compiles nothing. Measured with
+`tests/rig/rel-outage.mjs` (a download behind a relay that is taken away, with a uTP seed and a WebRTC seed at
+256 KiB/s each, the WebRTC seed on this stack or on libdatachannel, everything on loopback; 2026-11-14):
+
+| what is done with the WebRTC half | relay away | WebRTC bytes again, after the relay is back | runs |
+| --- | --- | --- | --- |
+| made again on a new socket, any port | 20 s | 1.5 to 2.2 s | 6 of 6 |
+| made again, with every port the relay's sockets held taken by somebody else | 20 s | 1.5 to 2.3 s | 4 of 4 |
+| made again on a new socket, any port | 5 s | 1.9 to 3.7 s | 21 of 21 |
+| made again on the port it had, the remote on this stack | 5 s | not within 40 s | 0 of 2 |
+| made again on the port it had, the remote on this stack | 20 s | 6.3 to 6.5 s | 2 of 2 |
+| kept, over a socket replaced under it on the same port | 5 s | 1.2 to 3.9 s | 6 of 6 |
+| kept, the remote on this stack | 10 s | 5.5 to 5.8 s | 2 of 2 |
+| kept, the remote on libdatachannel | 10 s | not within 40 s | 0 of 2 |
+| kept | 20 s | 11.2 s in the one run that lasted | 1 of 6 |
+| kept, with the port changed | 5 s | 26 s to this stack, not within 40 s to libdatachannel | 2 of 4 |
+| nothing | 5 s or 20 s | not while it was watched, 40 to 60 s: the download goes on over uTP alone | 0 of 8 |
+
+So the connections are not kept. A remote on libdatachannel ended its side 12.7 to 13.7 s into the silence (5
+runs), also when the relay was back by then; this stack failed a connection 22.9 to 23.2 s into it (4 runs);
+and one that does last waits for SCTP's backed off resend. A new socket takes any port because a remote on this
+stack still routes the old address and port to its old connection until that one fails. The uTP bytes moved
+again 3.4 to 6.8 s after the relay was back, on the engine's own, in 56 of 57 runs with the ports kept; in one,
+after 5 s away, not within the 40 s watched.
+
+What it costs: the new swarm has new tracker ids and an empty memory, so a remote that stayed silent is tried
+once more, and each remote keeps its end of the old connection until its own stack gives it up.
 
 ### What it promises
 
@@ -472,14 +592,17 @@ torrent was removed, makes it act on that at once.
 
 ### What the WebRTC class has to have
 
-`rtcLinks` and `servePeerLinks` use these members of `RTCPeerConnection` and nothing else: the constructor with
-`{ iceServers }`, `createDataChannel`, `createOffer`, `createAnswer`, `setLocalDescription`,
-`setRemoteDescription`, `localDescription.sdp`, `iceGatheringState`, `connectionState`, `close`, the handlers
-`onicecandidate`, `onicegatheringstatechange`, `onconnectionstatechange` and `ondatachannel`, and, where present,
-`sctp.maxMessageSize` and `sctp.transport.iceTransport.getSelectedCandidatePair()`. Of the channel: `binaryType`,
-`readyState`, `bufferedAmount`, `bufferedAmountLowThreshold`, `send`, `close`, and the handlers `onopen`,
-`onmessage`, `onclose`, `onerror` and `onbufferedamountlow`. A class that reports gathering complete as soon as
-its local description is set is read at once.
+`rtcLinks` and `servePeerLinks` take one shape, `PeerConnectionLike`, and three classes fit it as they are, with
+no cast: the platform's `RTCPeerConnection`, the one of `@banou/ponyfill`, and the one a factory of
+`libtorrent-wasm/webrtc` makes. They use these members and nothing else: the constructor with `{ iceServers }`,
+`createDataChannel`, `createOffer`, `createAnswer`, `setLocalDescription`, `setRemoteDescription`,
+`localDescription.sdp`, `iceGatheringState`, `connectionState`, `close`, and the handlers `onicecandidate`,
+`onicegatheringstatechange`, `onconnectionstatechange` and `ondatachannel`. `sctp` may be absent or null; where
+it is there, it has `maxMessageSize` and `transport.iceTransport.getSelectedCandidatePair()`, whose remote
+address is what `relay` compares. Of the channel: `binaryType`, `readyState`, `bufferedAmount`,
+`bufferedAmountLowThreshold`, `send`, `close`, and the handlers `onopen`, `onmessage`, `onclose`, `onerror` and
+`onbufferedamountlow`. A class that reports gathering complete as soon as its local description is set is read
+at once.
 
 ### Tests
 
@@ -489,19 +612,32 @@ npm run vite-build && node --test "tests/webtorrent/*.test.mjs"
 
 They need no browser, and `npm run test:ci` runs them with the engine's. Most run on in-memory stand-ins and
 need no wasm. The rest use the reference tracker (`bittorrent-tracker`) on a loopback socket and libdatachannel
-through `node-datachannel`, and skip themselves when its native module does not load. `engines.test.mjs` is
-the direct mode whole, and the one file that needs the built engine: two sessions on `offlineHost()`, a swarm
-over each, a file moved each way through the reference tracker, and every ask an engine makes of its host
-counted. Nothing in them reaches a public tracker or a public peer.
+through `node-datachannel`, and skip themselves when its native module does not load. Two files need what
+`npm run build` makes. `engines.test.mjs` is the direct mode whole, on the built engine: two sessions on
+`offlineHost()`, a swarm over each, a file moved each way through the reference tracker, and every ask an
+engine makes of its host counted. `relay.test.mjs` is the relay mode whole, on the built engine and the built
+WebRTC entry: sessions over real loopback sockets with the entry's class under the swarm, a file moved each way,
+one torrent fed by a TCP peer and a WebRTC peer at once, the channels of an address that is or was an ordinary
+peer closed unheard, the entry against libdatachannel, and a relay outage through `tests/rig/rel-outage.mjs`.
+`types/classes.ts` is compiled, never run: the three classes against `rtcLinks` as built. Nothing in them
+reaches a public tracker or a public peer.
 
 ## Building
 
-The full build runs inside Docker so the host needs nothing but Docker +
-Node:
-
 ```sh
-./build.sh     # one-shot: builds the image, copies dist/* out
+npm ci
+npm run build       # make-docker, copy-wasm, then build:webrtc (webrtc-wasm, vite-build, types)
+npm run test:ci     # the engine's tests and tests/webtorrent
+npm run test:webrtc # the WebRTC entry's tests, with the system Chrome
 ```
+
+The engine compiles inside Docker (`make-docker`: emsdk, boost and libtorrent with `patches/` applied, into
+`dist/`), so it asks nothing of the host but Docker and Node. The WebRTC entry's wasm is Rust and compiles on
+the host with cargo through rustup ([its section](#building-it) says what that needs); on NixOS,
+`nix shell nixpkgs#rustup -c npm run build`. `vite-build` and `types` then write every entry into `build/`,
+which is what the package ships.
+
+`./build.sh` is the engine alone, in one step: it builds the image and copies `dist/*` out.
 
 For iterative C++ development:
 
@@ -549,7 +685,9 @@ It runs on one thread, in a page, a worker or node, and needs no cross-origin
 isolation. It imports nothing: not `@fkn/lib`, not a node module, and nothing of
 the engine. The wasm is fetched from beside the module; a bundler that moves
 files passes it as `wasm` (`libtorrent-wasm/webrtc.wasm` resolves to it). So
-does node, whose `fetch` reads no file: there `wasm` is the file's bytes.
+does node, whose `fetch` reads no file: there `wasm` is the file's bytes. In
+TypeScript node's `dgram.Socket` and the socket of `@fkn/lib/dgram` fit `socket`
+as they are.
 
 ### What it stands in for
 
