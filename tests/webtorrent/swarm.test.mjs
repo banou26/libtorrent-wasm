@@ -977,11 +977,11 @@ test('with the relay flag the ordinary peers of a torrent are read every 10 s, a
   const r = rig(t, { relay: true })
   await r.start(1)
   await advance(t, 35 * SECOND, SECOND)
-  assert.equal(r.session.looks, 4, 'at 1, 11, 21 and 31 s')
+  assert.deepEqual(r.session.lookedAt.map(at => (at - NOW) / SECOND), [1, 11, 21, 31], 'at the first beat, then every 10 s')
   const plain = rig(t)
   await plain.start(1)
   await advance(t, 35 * SECOND, SECOND)
-  assert.equal(plain.session.looks, 0)
+  assert.deepEqual(plain.session.lookedAt, [])
 })
 
 test('a torrent remembers the addresses of 1000 ordinary peers, forgets the oldest first, and never one that is still there', async t => {
@@ -1001,7 +1001,7 @@ test('a torrent remembers the addresses of 1000 ordinary peers, forgets the olde
   await advance(t, SECOND)
   r.session.ordinary.set(1, Array.from({ length: BOUND }, (_, i) => peer(i)))
   await advance(t, 10 * SECOND, SECOND)
-  assert.equal(r.session.looks, 2)
+  assert.equal(r.session.lookedAt.length, 2)
 
   // One more appears while peer 0 is still there. Something has to go, and it is not peer 0.
   r.session.ordinary.set(1, [peer(0), peer(BOUND)])

@@ -459,8 +459,8 @@ export class FakeSession {
   /** Every stream handed over: { handle, socket, bytes: Buffer[], closed }. */
   streams = []
   ordinary = new Map()
-  /** How many times the ordinary peers were asked for. */
-  looks = 0
+  /** When the ordinary peers were asked for, by `Date.now()`. */
+  lookedAt = []
   dials = true
   speaks = false
   refuses = false
@@ -516,7 +516,7 @@ export class FakeSession {
   }
 
   async peers(handle) {
-    this.looks++
+    this.lookedAt.push(Date.now())
     return this.ordinary.get(handle) ?? []
   }
 
