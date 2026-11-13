@@ -15,11 +15,12 @@ export const inStreamRange = (address) => {
 }
 
 /**
- * @param {{ routes?: Record<string, string> }} [opts]
+ * @param {{ routes?: Record<string, string>, acceptedFrom?: string }} [opts]
  *   routes maps an address to the loopback address a tcp connect to it really goes to, so a peer
- *   on this machine can stand at an address libtorrent takes for a public one.
+ *   on this machine can stand at an address libtorrent takes for a public one. acceptedFrom is
+ *   the address every accepted tcp connection reads as coming from, for a peer that dials in.
  */
-export const countingHost = ({ routes = {} } = {}) => {
+export const countingHost = ({ routes = {}, acceptedFrom } = {}) => {
   const real = createNodeHost()
   const offline = offlineHost()
   /** Every tcp connect asked of the host, as { address, port }. */
@@ -36,7 +37,12 @@ export const countingHost = ({ routes = {} } = {}) => {
         const host = routes[options.host] ?? options.host
         return isLoopback(host) ? real.net.connect({ ...options, host }, ...rest) : offline.net.connect()
       },
-      createServer: real.net.createServer,
+      createServer: (...args) => {
+        const server = real.net.createServer(...args)
+        // before the shim's own listener, which reads the address
+        if (acceptedFrom) server.on('connection', (socket) => Object.defineProperty(socket, 'remoteAddress', { value: acceptedFrom }))
+        return server
+      },
     },
     dgram: {
       createSocket: (...args) => {
