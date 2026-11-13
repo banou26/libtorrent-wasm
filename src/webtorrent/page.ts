@@ -53,7 +53,7 @@ const whole = (bytes: Uint8Array): ArrayBuffer =>
  */
 export const servePeerLinks = (port: PortLike, options: RtcLinksOptions): (() => void) => {
   const links = rtcLinks(options)
-  type Served = { link?: Link, stream?: Stream, flush?: () => void, owed: number, unread: number }
+  type Served = { link?: Link, stream?: Stream, flush: () => void, owed: number, unread: number }
   const served = new Map<number, Served>()
   const post = (message: ToWorker, transfer: ArrayBuffer[] = []) => port.postMessage(message, transfer)
 
@@ -64,14 +64,17 @@ export const servePeerLinks = (port: PortLike, options: RtcLinksOptions): (() =>
   }
 
   const serve = async (id: number, make: (gathered: Gathered) => Promise<Made>) => {
-    const entry: Served = { owed: 0, unread: 0 }
+    // The wait for the worker's `flush` is there before the connection is: on a page whose tasks run late the
+    // flush comes first, and dropping it would leave the description unread and the connection open for good.
+    let flush!: () => void
+    const flushed = new Promise<void>(resolve => { flush = resolve })
+    const entry: Served = { flush, owed: 0, unread: 0 }
     served.set(id, entry)
-    const gathered: Gathered = ({ reflexive, complete }) => new Promise(resolve => {
-      if (served.get(id) !== entry) return resolve()
-      entry.flush = resolve
+    const gathered: Gathered = ({ reflexive, complete }) => {
       void reflexive.then(() => post({ t: 'candidate', id, last: false }))
       void complete.then(() => post({ t: 'candidate', id, last: true }))
-    })
+      return flushed
+    }
     try {
       const { sdp, link } = await make(gathered)
       if (served.get(id) !== entry) return link.close()
@@ -104,7 +107,7 @@ export const servePeerLinks = (port: PortLike, options: RtcLinksOptions): (() =>
     if (message.t === 'answer') return void serve(message.id, gathered => links.answer(message.sdp, gathered))
     const entry = served.get(message.id)
     if (!entry) return
-    if (message.t === 'flush') entry.flush?.()
+    if (message.t === 'flush') entry.flush()
     else if (message.t === 'accept') entry.link?.accept(message.sdp).catch(() => { /* onclose reports it */ })
     else if (message.t === 'ack') entry.unread -= message.bytes
     else if (message.t === 'data') {
@@ -112,7 +115,7 @@ export const servePeerLinks = (port: PortLike, options: RtcLinksOptions): (() =>
       if (entry.stream?.write(new Uint8Array(message.bytes))) acknowledge(message.id, entry)
     } else if (message.t === 'close') {
       served.delete(message.id)
-      entry.flush?.()
+      entry.flush()
       entry.link?.close()
     }
   }
@@ -120,7 +123,7 @@ export const servePeerLinks = (port: PortLike, options: RtcLinksOptions): (() =>
   return () => {
     port.onmessage = null
     for (const entry of served.values()) {
-      entry.flush?.()
+      entry.flush()
       entry.link?.close()
     }
     served.clear()

@@ -14,14 +14,19 @@ import { advance, fakeRtc, handlersOf, pair, reached, reading, settle, until, wi
 const KIB = 1024
 const MIB = 1024 * KIB
 
-/** A port that counts the bytes it carries each way. `queued` is what was posted as data and not acknowledged yet. */
+/**
+ * A port that counts what it carries each way: the bytes, and the messages of each kind it `said` and `heard`.
+ * `queued` is what was posted as data and not acknowledged yet.
+ */
 const tap = port => {
-  const stats = { dataOut: 0, ackIn: 0, dataIn: 0, maxQueued: 0, maxData: 0, oninput: null }
+  const stats = { dataOut: 0, ackIn: 0, dataIn: 0, maxQueued: 0, maxData: 0, oninput: null, said: {}, heard: {} }
+  const count = (kinds, kind) => { kinds[kind] = (kinds[kind] ?? 0) + 1 }
   return {
     stats,
     get onmessage() { return port.onmessage },
     set onmessage(listener) {
       port.onmessage = listener && (event => {
+        count(stats.heard, event.data.t)
         if (event.data.t === 'data') stats.dataIn += event.data.bytes.byteLength
         if (event.data.t === 'ack') stats.ackIn += event.data.bytes
         stats.oninput?.()
@@ -29,6 +34,7 @@ const tap = port => {
       })
     },
     postMessage(message, transfer) {
+      count(stats.said, message.t)
       if (message.t === 'data') {
         stats.dataOut += message.bytes.byteLength
         stats.maxData = Math.max(stats.maxData, message.bytes.byteLength)
@@ -253,6 +259,28 @@ test('the page says when it sees a reflexive candidate, and the worker reads the
   await reached('the offer', () => made !== null)
   assert.match(made.sdp, /typ srflx/)
   made.link.close()
+})
+
+test('a flush that reaches the page before its connection can be waited on is kept, so a late page still answers', async t => {
+  // A page so late that the worker's 3 s cap passes before the connection has its local description.
+  let catchUp
+  const late = new Promise(resolve => { catchUp = resolve })
+  class Late extends fakeRtc({ gathering: {} }) {
+    async setLocalDescription(description) {
+      await late
+      return super.setLocalDescription(description)
+    }
+  }
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const one = half(t, Late)
+  let made = null
+  one.links.offer().then(result => { made = result })
+  await advance(t, 3000)
+  await reached('the flush at the page', () => one.page.heard.flush === 1)
+  catchUp()
+  await reached('the offer', () => made !== null)
+  made.link.close()
+  await reached('the page closed its connection', () => Late.all.every(pc => pc.closed))
 })
 
 test('the gathering cap is the worker’s: a page with no timers still answers, 3 s after the request', async t => {
