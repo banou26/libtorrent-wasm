@@ -61,6 +61,7 @@ nix build --no-link --print-out-paths 'nixpkgs#transmission_4'
 | `offline-engine.mjs` | the engine in a worker thread on `offlineHost()`, reporting what it asked of the host |
 | `relay-host.mjs` | node's sockets on loopback behind a relay that can be taken away and brought back, with `@fkn/lib`'s events; the ports its sockets held can come back taken |
 | `relay-outage.mjs` | a download from transmission seeders with the relay taken away part way, timed second by second (`--moved`, `--play`, `--outage`) |
+| `outage-swarm.mjs` | one engine of `tests/relay-return.test.mjs` in a worker thread: a seed on node's sockets, or a leech behind `relay-host.mjs` |
 
 ## What it does not answer
 

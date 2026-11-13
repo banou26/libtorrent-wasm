@@ -333,6 +333,15 @@ addToLibrary({
     // the datagram socket under a udp fd does not survive losing the connection, so the fd keeps its identity and the socket underneath is replaced, re-bound to the same local port
     UDP_REOPEN_DELAYS: [250, 1000, 2000],
 
+    /**
+     * The outage past which a healed udp socket has its uTP peers reset and dialled again. A shorter
+     * one leaves connections that carry on by themselves, every remote still resending: measured,
+     * bytes again 0.95 s after a relay away for 1 s with the connections kept, 5.4 to 6.5 s with the
+     * redial. A longer one may outlast a remote's side of them (libtorrent's defaults resend last 4.5 s
+     * into the silence), and a connection kept past that sits until our own uTP gives up, about 196 s.
+     */
+    REDIAL_AFTER_MS: 3000,
+
     // `adopt` is a socket the host bound before the session existed, already listening on the port
     // wrapper.cpp was told to announce. Adopting it rather than binding a fresh one is what keeps
     // the announced port true: a socket bound after the fact could not get that number back, since
@@ -381,6 +390,11 @@ addToLibrary({
         const a = sock.address()
         st.localAddr = a.address; st.localPort = a.port; st.localFamily = a.family
         if (st.homePort == null) st.homePort = a.port
+        // healed: every uTP peer rode the socket this one replaces (wrapper.cpp, lt_session_redial_utp_peers)
+        if (st.outageAt != null && Date.now() - st.outageAt > FKN.REDIAL_AFTER_MS && Module._lt_session_redial_utp_peers) {
+          Module._lt_session_redial_utp_peers()
+          FKN.scheduleTick()
+        }
         st.outageAt = null
       })
 

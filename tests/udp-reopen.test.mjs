@@ -30,7 +30,8 @@ const makeDgram = () => {
   }
 }
 
-const loadShim = (dgram) => {
+// `wasm` stands in for the module's exports the shim calls
+const loadShim = (dgram, wasm = {}) => {
   const heap = new Uint8Array(1 << 16)
   let library
   const addToLibrary = (obj) => { library = obj }
@@ -38,7 +39,7 @@ const loadShim = (dgram) => {
     'addToLibrary', 'Module', 'HEAPU8', 'HEAP16', 'HEAPU16', 'HEAP32', 'HEAPU32', 'performance', 'console',
     source + '\nreturn null',
   )
-  fn(addToLibrary, { fkn: { net: {}, dgram, storage: null } }, heap,
+  fn(addToLibrary, { fkn: { net: {}, dgram, storage: null }, ...wasm }, heap,
     new Int16Array(heap.buffer), new Uint16Array(heap.buffer), new Int32Array(heap.buffer), new Uint32Array(heap.buffer),
     { now: () => 0 }, { log() {}, warn() {}, error() {} })
 
@@ -234,8 +235,8 @@ const makeRelayDgram = () => {
 const STEP = 10
 const advance = (t, ms) => { for (let i = 0; i < ms / STEP; i++) t.mock.timers.tick(STEP) }
 
-const relayUdpState = (t, relay) => {
-  const { FKN } = loadShim(relay)
+const relayUdpState = (t, relay, wasm) => {
+  const { FKN } = loadShim(relay, wasm)
   const st = { kind: 'udp', family: 'IPv4', nonblock: false, socket: null, udpRecv: [], reopenAttempts: 0 }
   FKN._dbgWorkerUdpPkts = 0; FKN._dbgWorkerUdpBytes = 0; FKN._dbgJsBusyUs = 0; FKN._dbgJsHandlerCalls = 0
   FKN.attachUdp(st)
@@ -291,4 +292,24 @@ test('a port somebody took is given up after KEEP_PORT_MS, and the next outage a
   for (let i = 0; i < 250 && !healed(); i++) t.mock.timers.tick(STEP)
   assert.equal(relay.binds.at(-1).port, 6882, 'the next outage did not ask for the published port')
   assert.equal(st.localPort, 6882)
+})
+
+test('a socket back after more than REDIAL_AFTER_MS hands its uTP peers to a redial, once, and a blip or a first bind does not', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
+  const relay = makeRelayDgram()
+  let redials = 0
+  const { FKN, st, drop } = relayUdpState(t, relay, { _lt_session_redial_utp_peers: () => { redials++ } })
+  assert.equal(redials, 0, 'the first bind redialled')
+
+  for (const [awayMs, expected] of [[5_000, 1], [1_000, 1], [5_000, 2]]) {
+    relay.away = true
+    drop()
+    drop()
+    advance(t, awayMs)
+    assert.equal(redials, expected - (awayMs > FKN.REDIAL_AFTER_MS ? 1 : 0), 'a redial before the socket was back')
+    relay.away = false
+    advance(t, 2_100)
+    assert.equal(st.socket.granted, 6882)
+    assert.equal(redials, expected, `a relay away ${awayMs} ms left ${redials} redials in all`)
+  }
 })

@@ -1,0 +1,19 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Banou <me@banou.dev>
+Date: Fri, 13 Nov 2026 19:00:00 +0900
+Subject: [PATCH] feat: a uTP socket names the last sequence number it received
+
+---
+diff --git a/include/libtorrent/aux_/utp_stream.hpp b/include/libtorrent/aux_/utp_stream.hpp
+--- a/include/libtorrent/aux_/utp_stream.hpp
++++ b/include/libtorrent/aux_/utp_stream.hpp
+@@ -687,6 +687,9 @@
+ 	udp::endpoint remote_endpoint() const;
+ 
+ 	std::uint16_t receive_id() const { return m_recv_id; }
++	// WASM patch: the last sequence number received in order, which a reset to this socket's remote has
++	// to acknowledge for libtorrent to take it (incoming_packet's ack_nr check)
++	std::uint16_t ack_nr() const { return m_ack_nr; }
+ 	bool match(udp::endpoint const& ep, std::uint16_t id) const;
+ 
+ 	// non-copyable
