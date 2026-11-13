@@ -723,6 +723,25 @@ for (const dialled of [true, false]) {
   })
 }
 
+// What libdatachannel as our end sees of the same peer: the channel is closed under us before its open event
+// is handled, so the engine's first write, made while it is handed the stream, is what ends it.
+test('a remote whose channel is already closed when the engine first writes to it is left alone too', async t => {
+  const r = rig(t)
+  r.tracker.phantoms = { complete: 1, incomplete: 0 }
+  await r.start(1)
+  r.session.speaks = true
+  const remote = new Remote(r, undefined, fakeRtc())
+  const [offer] = r.offered(1)[0].offers
+  const made = await remote.links.answer(offer.offer.sdp)
+  made.link.onopen = socket => socket.destroy()
+  remote.relay(1, offer.offer_id, { answer: { type: 'answer', sdp: made.sdp } })
+  await settle()
+  assert.equal(r.session.streams.length, 1, 'the stream was handed over')
+  assert.deepEqual([r.peers.snapshot().torrents[0].silent, r.live()], [1, 0])
+  await advance(t, 121 * SECOND, SECOND)
+  assert.equal(await remote.connect(1), false)
+})
+
 test('a silent remote is still left alone after its torrent was paused and resumed', async t => {
   const r = rig(t)
   await r.start(1)

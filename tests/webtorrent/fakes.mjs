@@ -450,7 +450,8 @@ export const handlersOf = pc => [
 
 /**
  * A session as the swarm sees one. `dials` decides whether a stream handed over is read at once, the way
- * libtorrent's dial reads it; `refuses` makes addPeerStream throw.
+ * libtorrent's dial reads it; `speaks` makes it write its handshake in the same call; `refuses` makes
+ * addPeerStream throw.
  */
 export class FakeSession {
   views = new Map()
@@ -461,6 +462,7 @@ export class FakeSession {
   /** How many times the ordinary peers were asked for. */
   looks = 0
   dials = true
+  speaks = false
   refuses = false
   /** addPeerStream takes the stream and destroys it before it returns, as the engine does for a torrent it has not. */
   destroys = false
@@ -528,6 +530,7 @@ export class FakeSession {
     } else if (this.dials) {
       socket.on('data', bytes => stream.bytes.push(Buffer.from(bytes)))
       socket.on('close', () => { stream.closed = true })
+      if (this.speaks) socket.write(Buffer.alloc(68, 19))
     }
     return { address: '100.64.0.1', port: 6881 }
   }

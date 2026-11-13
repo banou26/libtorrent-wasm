@@ -364,6 +364,9 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       for (const quiet of t.quiet.values()) if (quiet.address === address) return drop(conn)
     }
     if (!conn.remote || !session.torrent(t.handle)?.running) return drop(conn)
+    // Known before the hand-over: a stream can end during it, when the engine's first write meets a channel
+    // its remote has already closed, and how it ended is what tells a silent remote.
+    conn.socket = socket
     try {
       session.addPeerStream(t.handle, socket)
     } catch {
@@ -372,7 +375,6 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     // The engine destroys a stream it cannot take, where another session would throw.
     if (!t.conns.has(conn)) return
     conn.state = 'open'
-    conn.socket = socket
     conn.deadline = Date.now() + UNDIALLED_MS
     t.lastPeerAt = Date.now()
     changed()
