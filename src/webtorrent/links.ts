@@ -37,6 +37,10 @@ export type Gathering = { reflexive: Promise<void>, complete: Promise<void> }
 /** Decides when a local description is read: resolves at that moment. */
 export type Gathered = (gathering: Gathering) => Promise<void>
 
+/**
+ * The `Gathered` used unless a caller passes one: gathering complete, `REFLEXIVE_GRACE_MS` after the first
+ * reflexive candidate, or `GATHER_CAP_MS`, whichever is first. Its timers run in the thread that calls it.
+ */
 export const gatherCap: Gathered = ({ reflexive, complete }) => new Promise(resolve => {
   let grace: ReturnType<typeof setTimeout> | undefined
   let settled = false
@@ -102,8 +106,9 @@ export type RtcLinks = {
  *
  * It promises a description within `GATHER_CAP_MS` (or whenever `gathered` says), a stream that keeps what the
  * remote sent before anything read it, sends cut to the connection's message limit and paced by the channel's
- * `bufferedAmount`, and that a closed link holds no reference to its connection. It contacts nothing by itself:
- * the ICE servers are the caller's.
+ * `bufferedAmount`, and that a closed link leaves none of its handlers on the connection. The link itself still
+ * reaches its connection, so the connection is freed once the caller lets the link go. It contacts nothing by
+ * itself: the ICE servers are the caller's.
  */
 export const rtcLinks = ({ RTCPeerConnection, iceServers = [] }: RtcLinksOptions): RtcLinks => {
   const connections = new WeakMap<Link, PeerConnectionLike>()
