@@ -278,12 +278,15 @@ webtorrentPeers(session, {
   offer or an answer that arrives from its remote opens nothing beside it. Of an offer of ours and one of theirs
   that cross, both ends keep the one from the smaller tracker id. The attempt that loses is closed at our end
   every time, since a libtorrent 2.1 peer never closes its own.
-- **A remote that stays silent is left alone.** When the engine ends a stream it read and that never delivered a
-  byte (libtorrent's handshake timeout, 10.4 to 12.7 s after the channel opened), the remote's offers are not
-  answered and its answers not taken for 10 minutes, and with `relay` no channel from its address is taken
-  either. That is how a libtorrent 2.1 peer that will not talk to this address looks: it opens the channel, says
-  nothing and never closes it. A remote that sent one byte is never counted so. `snapshot()` counts these remotes
-  per torrent (`silent`), so an interface can tell peers that refuse this address from nobody being there.
+- **A remote that never says a word is left alone.** When a channel that opened ends before a single byte came
+  from its remote, the remote's offers are not answered and its answers not taken for 10 minutes, and with
+  `relay` no channel from its address is taken either. That is how a libtorrent 2.1 peer that will not talk to
+  this address looks: it answers, the channel opens, and nothing comes. Chrome 156 and libdatachannel see it end
+  the channel within a millisecond of its opening; the reference client's stack sees it stay open until
+  libtorrent's handshake timeout ends the stream, 10.4 to 12.7 s later. Both count. A remote that sent one byte
+  never does, nor does a channel the swarm closed itself, nor a stream the engine let go without reading it.
+  `snapshot()` counts these remotes per torrent (`silent`), so an interface can tell peers that refuse this
+  address from nobody being there.
 - **Its ids have the shape a libtorrent 2.1 peer reads.** The peer id and every offer id are exactly 20 bytes,
   each sent as a JSON string of one character for each byte. One message of another shape makes a 2.1.1 peer
   drop its tracker socket for up to a minute.
@@ -327,7 +330,7 @@ webtorrentPeers(session, {
 | an open channel nothing reads | closed after 10 s |
 | an attempt whose description never comes | given up after 10 s |
 | a remote whose channel closed | not answered for 60 s |
-| a remote whose stream the engine ended before it had sent a byte | not answered, and its answers not taken, for 10 min |
+| a remote whose channel opened and ended before it had sent a byte | not answered, and its answers not taken, for 10 min |
 | remotes a torrent leaves alone at one time | 200, then the oldest is forgotten |
 | with `relay`, a channel whose remote address is or was an ordinary peer of the torrent in this session | closed |
 | with `relay`, the addresses of ordinary peers a torrent remembers | 1000, then the oldest is forgotten; read every 10 s and when a channel opens |
@@ -350,7 +353,7 @@ webtorrentPeers(session, {
 
 | member | what it is |
 | --- | --- |
-| `addPeerStream(handle, socket)` | hands libtorrent an open stream as a peer; throws, or destroys the stream, when it cannot. When libtorrent gives a peer up it destroys the stream: one it had read and that never delivered a byte marks its remote silent |
+| `addPeerStream(handle, socket)` | hands libtorrent an open stream as a peer; throws, or destroys the stream, when it cannot. When libtorrent gives a peer up it destroys the stream: one it had read and that never delivered a byte counts its remote as silent |
 | `torrents()` | the handle of every torrent |
 | `torrent(handle)` | `{ infoHash, trackers, running, hasMetadata, private, uploaded, downloaded, left, watched }`, or null |
 | `on` / `off` | `add`, `remove`, `pause` and `resume`, each with the handle. Anything else is noticed within a second |
