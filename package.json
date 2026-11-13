@@ -56,6 +56,7 @@
     "copy-wasm": "copyfiles -u 1 dist/libtorrent.js dist/libtorrent.wasm build",
     "test": "node --test --test-timeout=60000 \"tests/**/*.test.mjs\"",
     "test:ci": "node --test --test-timeout=60000 $(ls tests/*.test.mjs | grep -v -e rate-limits -e forget-pieces-swarm) tests/webtorrent/*.test.mjs",
+    "test:webrtc": "node --test --test-timeout=120000 \"tests/webrtc/*.test.mjs\"",
     "test:fd-lifecycle": "node scripts/test-fd-lifecycle.mjs",
     "test:swarm": "node tests/rig/run.mjs",
     "test:bad-peer": "node tests/rig/bad-swarm.mjs"
@@ -69,7 +70,7 @@
     "bittorrent-tracker": "^11.2.3",
     "concurrently": "^7.6.0",
     "copyfiles": "^2.4.1",
-    "node-datachannel": "^0.32.3",
+    "node-datachannel": "0.32.3",
     "nodemon": "^2.0.22",
     "playwright": "^1.60.0",
     "typescript": "^7.0.2",
