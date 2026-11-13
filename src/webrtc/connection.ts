@@ -50,6 +50,15 @@ const CLOSED = 8
 export const MAX_MESSAGE_SIZE = 262144
 const SEND_QUEUE_LIMIT = 16 * 1024 * 1024
 
+/**
+ * Datagrams a socket is handed in one millisecond. A window that opens all at once, on a write
+ * into an idle connection or on a retransmission timeout, is about a thousand datagrams, and
+ * node's dgram puts what one task hands it on the wire together. libtorrent 2.1 ends a
+ * connection on reading 1000 datagrams with its socket never empty: 4 of 15 uploads of 256 MiB
+ * over a 50 ms round trip ended that way, and none of 30 with this bound.
+ */
+const MAX_BURST = 128
+
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const ignore = () => {}
@@ -128,6 +137,12 @@ export class Host {
   readonly routes = new Map<string, { connection: Connection; ip: number }>()
   dropped = 0
   closed = false
+  /** Datagrams handed to the socket since `#turned`, on the clock of `performance.now()`. */
+  #burst = 0
+  #turned = 0
+  /** Datagrams that wait for a later millisecond, oldest first: at most what the stack has in flight. */
+  #held: [Uint8Array, number, string][] = []
+  #timer: ReturnType<typeof setTimeout> | undefined
   #scratch = 0
   #scratchLength = 0
 
@@ -146,6 +161,40 @@ export class Host {
     socket.on('message', this.receive)
     socket.on('error', this.fail)
     socket.on('close', this.fail)
+  }
+
+  /** Hands the socket a datagram, or holds it once MAX_BURST have gone out in this millisecond. */
+  transmit(data: Uint8Array, port: number, address: string) {
+    if (this.#burst < MAX_BURST) {
+      this.#burst++
+      this.socket.send(data, port, address, ignore)
+    } else {
+      this.#held.push([data, port, address])
+      this.#wait()
+    }
+  }
+
+  /** What is held goes out on the next arrival, or on this timer when nothing arrives. */
+  #wait() {
+    this.#timer ??= setTimeout(() => {
+      this.#timer = undefined
+      this.#turn()
+    }, 1)
+  }
+
+  /**
+   * Starts the next millisecond once this one is over, with what was held first. Only where a
+   * task begins, on a datagram's arrival or on the timer: the clock also moves inside a task,
+   * and what one task hands a socket can leave together.
+   */
+  #turn() {
+    const now = performance.now()
+    if (now - this.#turned >= 1) {
+      this.#turned = now
+      this.#burst = 0
+      for (const datagram of this.#held.splice(0, MAX_BURST)) this.transmit(...datagram)
+    }
+    if (this.#held.length) this.#wait()
   }
 
   /** Copies `bytes` into the stack's memory, where they stay until the next `put`. */
@@ -181,6 +230,7 @@ export class Host {
   }
 
   receive = (data: Uint8Array, remote: { address: string; port: number }) => {
+    this.#turn()
     const key = `${remote.address}:${remote.port}`
     let route = this.routes.get(key)
     if (!route) {
@@ -222,7 +272,10 @@ export class Host {
     this.socket.off('message', this.receive)
     this.socket.off('error', this.fail)
     this.socket.off('close', this.fail)
+    // the last words of each connection go out now, and the data that waits never does
+    this.#burst = 0
     for (const connection of this.connections) end(connection)
+    clearTimeout(this.#timer)
   }
 }
 
@@ -413,7 +466,7 @@ class Connection {
   }
 
   #transmit(handle: number) {
-    const { x, socket } = this.host
+    const { x } = this.host
     // copied: the socket may send after this returns, when the stack has reused its buffer
     const data = this.#out(handle).slice()
     const port = x.rtc_port(handle)
@@ -424,7 +477,7 @@ class Connection {
       this.peerAddress = address
       this.peerPort = port
     }
-    socket.send(data, port, address, ignore)
+    this.host.transmit(data, port, address)
   }
 
   /** Everything the stack has to say after one operation. */

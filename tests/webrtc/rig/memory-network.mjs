@@ -1,9 +1,10 @@
 // dgram-shaped sockets joined in memory, for runs with no network and no native module.
-// A datagram arrives in a later microtask and never inside send(), which is how a real socket
-// delivers; with `inside` it arrives inside send(), which a socket joined in memory may also do.
+// A datagram arrives in a later microtask and never inside send(); with `inside` it arrives
+// inside send(), which a socket joined in memory may also do; with `task` it arrives in a task
+// of its own, which is how a real socket delivers.
 // Plain JavaScript with no import, so a browser worker loads the same file.
 
-export function network({ inside = false } = {}) {
+export function network({ inside = false, task = false } = {}) {
   const sockets = new Map()
   return {
     /** A socket at `address:port`. Its `sent` lists every datagram handed to send(), delivered or not. */
@@ -30,6 +31,7 @@ export function network({ inside = false } = {}) {
           const to = sockets.get(`${toAddress}:${toPort}`)
           const deliver = () => to?.emit('message', data, { address, port })
           if (inside) deliver()
+          else if (task) setTimeout(deliver)
           else queueMicrotask(deliver)
           callback?.(null)
         },
