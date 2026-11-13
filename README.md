@@ -354,8 +354,21 @@ worker.addEventListener('message', ({ data }) => {
 - **The class** is `RTCPeerConnection` of `@banou/ponyfill`, in a release after 0.0.13, which has none.
   Chromium counts a closed connection against its 500 a page until a garbage collection, and that class
   brings those slots back when a construction is refused. The browser's own class works until that limit.
-- **A magnet that names no `ws` or `wss` tracker finds nobody in this mode.** Until its metadata says whether
-  it is private it is announced to its own trackers only, and with no relay only a peer can bring the metadata.
+- **A magnet is announced to the passed trackers before its metadata says whether it is private.** In this
+  mode only a WebRTC peer can bring the metadata, and most magnets name `udp` and `http` trackers only. So a
+  torrent whose private flag is not known yet is announced to its own `ws` and `wss` trackers and to the
+  passed ones. For that time, which lasts until a peer has sent the metadata, each passed tracker sees its
+  info hash and the address the announce came from.
+  - **The metadata says it is not private:** nothing changes.
+  - **The metadata says it is private:** each passed tracker is told `stopped` for it, once, and hears nothing
+    of it again, however long the torrent runs. That waits for no check of the files. Offers and answers that
+    went through a passed tracker and have not opened a channel yet are closed. A channel that is already open
+    stays: it is a peer of the engine's by then, and libtorrent keeps the peers a magnet had when its metadata
+    says private. The torrent's own trackers are announced to as before. Nothing remembers the torrent past
+    its removal: the same magnet added again is announced like any magnet until its metadata is back.
+  - **A torrent known to be private from the start** (a .torrent file, or resume data saved once the metadata
+    was there, which carries it) is announced to its own trackers only, never to a passed one. With no `ws` or
+    `wss` tracker of its own it finds nobody in this mode.
 
 What `peers.snapshot()` tells an interface, for each running torrent (`torrents[]`) and for the session:
 
@@ -422,7 +435,7 @@ The pump and `peers.snapshot()` are the direct mode's. What differs:
 | `WebSocket` | the platform's | a constructor of the platform's shape whose sockets go through the relay (`WebSocket` of `@fkn/lib/websocket`) |
 | who sees the person's address | each tracker, the STUN host and every peer | none of them: they see the relay's |
 | `relay` | left out | `true`: a channel whose remote address is an ordinary peer of the torrent, or was one earlier in the session, is closed before libtorrent hears of it |
-| a magnet that names no `ws` tracker | finds nobody | gets its metadata from its ordinary peers, and is announced to the passed trackers once it is known not to be private |
+| a magnet whose metadata has not said whether it is private | announced to its own trackers and to the passed ones, which are told `stopped` if it says private | announced to its own only: its ordinary peers bring the metadata, and the passed ones follow once it is known not to be private |
 | when the socket ends | nothing to do: the browser's connections are the page's | the factory ends with it: make both again ([below](#when-the-relay-goes-away-in-the-relay-mode)) |
 
 Its limits:
@@ -512,7 +525,9 @@ once more, and each remote keeps its end of the old connection until its own sta
   `wss://tracker.webtorrent.dev`) and `DEFAULT_ICE_SERVERS` (`stun:stun.l.google.com:19302`) are constants to
   pass, or not. Each host that is passed sees the person's IP address, and a tracker also sees which torrents run.
 - **A torrent is announced to its own `ws` and `wss` trackers and to the ones passed.** A private torrent only to
-  its own. A magnet whose private flag is not known yet is not announced to the passed ones until it is.
+  its own. A magnet whose private flag is not known yet: with `relay`, only to its own until the metadata says
+  it is not private; without, to the passed ones too, which are told `stopped` once if the metadata says private
+  ([the direct mode](#the-direct-mode)).
 - **A tracker name that is the person's own machine or network is never opened**: `localhost`, a name with no dot,
   `.local`, and loopback, private, shared and link-local addresses. A browser asks permission before such a socket.
 - **Only running torrents.** One that is paused, queued, in error or removed is told `stopped` and its attempts
@@ -610,7 +625,7 @@ them once a second, and at once when `refresh()` is called:
 | `torrents()` | the handle of every torrent |
 | `infohash(handle)` | what it announces. Null until the session's alerts were pumped: the torrent waits |
 | `status(handle)` | whether the torrent runs (not paused, no error), whether it is checking, whether its metadata is known, the bytes still wanted and the payload this session moved. Null until a status was pumped: the torrent waits |
-| `isPrivate(handle)` | a private torrent is announced to its own trackers only, and so is one whose flag is not known yet |
+| `isPrivate(handle)` | a private torrent is announced to its own trackers only, and with `relay` so is one whose flag is not known yet |
 | `webSocketTrackers(handle)` | the torrent's own `ws` and `wss` trackers |
 | `hasStreamWindow(handle)` | a torrent somebody is reading is served before the others. A window planned with `deadlines: false`, a save, is not that |
 | `addPeerStream(handle, socket)` | hands libtorrent an open stream as a peer. When libtorrent gives a peer up it destroys the stream: one it had read and that never delivered a byte counts its remote as silent |
@@ -644,7 +659,8 @@ They need no browser, and `npm run test:ci` runs them with the engine's. Most ru
 need no wasm. The rest use the reference tracker (`bittorrent-tracker`) on a loopback socket and libdatachannel
 through `node-datachannel`, and skip themselves when its native module does not load. Two files need what
 `npm run build` makes. `engines.test.mjs` is the direct mode whole, on the built engine: two sessions on
-`offlineHost()`, a swarm over each, a file moved each way through the reference tracker, and every ask an
+`offlineHost()`, a swarm over each, a file moved each way through the reference tracker, a magnet that names
+no tracker found through a passed one, a private torrent that no passed tracker hears of, and every ask an
 engine makes of its host counted. `relay.test.mjs` is the relay mode whole, on the built engine and the built
 WebRTC entry: sessions over real loopback sockets with the entry's class under the swarm, a file moved each way,
 one torrent fed by a TCP peer and a WebRTC peer at once, the channels of an address that is or was an ordinary
