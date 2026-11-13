@@ -240,8 +240,10 @@ sockets under them, so libtorrent never sees the outage:
   socket has stayed up 2 s the ones that have not dialled us back are dialled
   again. A remote keeps its side of the old connection until its own resends
   give up and refuses a second one from us meanwhile, so the reset is what lets
-  the new one in. A relay that goes away again within those 2 s holds the
-  redial until a socket lasts.
+  the new one in. It is numbered at the first packet the remote has not
+  acknowledged (patch 0015): a libtorrent remote drops a reset numbered past
+  its reorder window, which upstream's random number is half the time. A relay
+  that goes away again within those 2 s holds the redial until a socket lasts.
 - Left alone: the connections through a shorter outage, since every remote is
   still resending and they carry on by themselves, and a peer that dialled us
   over uTP, which nothing could dial back and which carries on the same way.
@@ -260,6 +262,14 @@ each): a seed behind the relay served the peer that had dialled it again 2.3 to
 2.5 s after the relay, a relay away again 1 s after it came back cost 5.0 to
 5.5 s after its second return, and a relay away 2 s cost 2.2 to 3.4 s with the
 connections kept. One away 60 s or 300 s came back on the same port.
+
+The reset's number decides it when this end sent packets into the outage. The
+remote then takes the FIN of the disconnect only after those packets, and they
+are resent on a timer the outage has backed off. With such packets made on
+purpose (`tests/rig/rel-outage.mjs --queued`, the relay away 20 s, alternated
+between the engine with upstream's random number and with patch 0015): no uTP
+byte within the 40 s watched in 4 of 12 runs before, each of them one of the 6
+whose reset was numbered past the window, and in 0 of 12 after (4.7 to 6.8 s).
 
 What is left: a relay that goes away again in the moment between the redial's
 dial and the remote's answer leaves the remote holding a connection this end
@@ -453,9 +463,9 @@ With `wasm` passed as a compiled `WebAssembly.Module`, a new factory compiles no
 
 | what is done with the WebRTC half | relay away | WebRTC bytes again, after the relay is back | runs |
 | --- | --- | --- | --- |
-| made again on a new socket, any port | 20 s | 1.5 to 2.2 s | 6 of 6 |
+| made again on a new socket, any port | 20 s | 1.5 to 3.2 s | 36 of 36 |
 | made again, with every port the relay's sockets held taken by somebody else | 20 s | 1.5 to 2.3 s | 4 of 4 |
-| made again on a new socket, any port | 5 s | 1.9 to 3.7 s | 21 of 21 |
+| made again on a new socket, any port | 5 s | 1.9 to 3.7 s | 33 of 33 |
 | made again on the port it had, the remote on this stack | 5 s | not within 40 s | 0 of 2 |
 | made again on the port it had, the remote on this stack | 20 s | 6.3 to 6.5 s | 2 of 2 |
 | kept, over a socket replaced under it on the same port | 5 s | 1.2 to 3.9 s | 6 of 6 |
@@ -468,9 +478,14 @@ With `wasm` passed as a compiled `WebAssembly.Module`, a new factory compiles no
 So the connections are not kept. A remote on libdatachannel ended its side 12.7 to 13.7 s into the silence (5
 runs), also when the relay was back by then; this stack failed a connection 22.9 to 23.3 s into it (6 runs);
 and one that does last waits for SCTP's backed off resend. A new socket takes any port because a remote on this
-stack still routes the old address and port to its old connection until that one fails. The uTP bytes moved
-again 3.4 to 6.8 s after the relay was back, on the engine's own, in 56 of 57 runs with the ports kept; in one,
-after 5 s away, not within the 40 s watched.
+stack still routes the old address and port to its old connection until that one fails.
+
+The uTP bytes moved again on the engine's own, 3.4 to 6.2 s after the relay was back, in 42 of 42 runs with the
+ports kept (30 with the relay away 20 s, 12 with 5 s). Before patch 0015, 2 of 83 such runs had no uTP byte
+within the 40 s watched. The one that kept the seed's alerts shows the seed taking the redial and ending it at
+once, as it does when it has dropped the reset ([above](#when-the-relay-goes-away)); the rig did not record the
+reset then, and does now (`utpReset`, `utpResetAhead`). In 5 of the 30 runs at 20 s this end had sent a packet
+into the outage with nothing done to make it, which is the case the reset's number decides.
 
 What it costs: the new swarm has new tracker ids and an empty memory, so a remote that stayed silent is tried
 once more, and each remote keeps its end of the old connection until its own stack gives it up.
@@ -1120,3 +1135,4 @@ rerun `make apply-patches`; rejected hunks must be reconciled manually.
 | 0012 | A peer's `reqq` lowers the request queue and never raises it past `max_out_request_queue`, so no peer is asked for more than 5000 blocks at once, 78 MiB. The receive bound of a peer stream is sized from that. |
 | 0013 | A peer the engine dialled on an `addPeerStream` address is read as having no `ut_holepunch`, so no holepunch message goes to it and none from it is acted on. Asked for a rendezvous, a libtorrent 2.1 remote tells the peer we could not reach our address, and that peer then leaves our stream to it silent. Asked by one, the engine would tell an ordinary peer to connect to the made-up address. A peer that dialled in from `100.64.0.0/10` is an ordinary one and keeps its holepunch. |
 | 0014 | A uTP socket names the last sequence number it received, which the reset sent when the relay comes back has to acknowledge for a libtorrent remote to take it. |
+| 0015 | A uTP reset is numbered at the first packet its remote has not acknowledged, where upstream numbers it at random. A libtorrent remote drops a packet numbered past its reorder window before it reads the type, which is half of all numbers. |
