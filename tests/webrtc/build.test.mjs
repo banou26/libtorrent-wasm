@@ -109,6 +109,12 @@ test("the platform's own RTCPeerConnection fits the type of the entry's construc
   assert.equal(status, 0, stdout + stderr)
 })
 
+test('node exits with the entry imported: the port it listens on for its own messages does not hold the process', () => {
+  const entry = new URL('../../build/webrtc.js', import.meta.url).href
+  const { status, signal } = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(entry)})`], { timeout: 10_000 })
+  assert.deepEqual({ status, signal }, { status: 0, signal: null }, 'the process was still running after 10 s')
+})
+
 test('the package ships the entry, its types and its wasm, and the entry imports nothing', () => {
   const pkg = JSON.parse(read('package.json'))
   assert.deepEqual(pkg.exports['./webrtc'], { types: './build/webrtc/index.d.ts', import: './build/webrtc.js' })

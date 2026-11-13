@@ -103,6 +103,21 @@ test('a write into an open window hands the socket 128 datagrams in its task, an
   t.diagnostic(`${handed.length} datagrams, at most ${busiest(handed)} within one millisecond`)
 })
 
+test('a socket that delivers many datagrams in one task is handed 128 in a task all the same', async (t) => {
+  // @fkn/lib's dgram: a task of 64 acknowledgements takes milliseconds, and the clock alone starts the count again in each
+  const { local, channel, far } = await warmed(t, { sendBufferSize: 4 * MiB }, { batch: true })
+  const { batches } = local.socket
+  batches.length = 0
+  const arriving = receive(far, 4 * MiB)
+  write(channel, 256)
+  const arrived = await within(arriving, 10_000, 'what waited did not all go out and arrive in 10 s')
+  assert.equal(arrived.bytes, 4 * MiB)
+  const most = Math.max(...batches)
+  assert.ok(most > 100, `no task handed the socket more than ${most} datagrams, so the window was not open and this proves nothing`)
+  assert.ok(most <= 128, `one task handed the socket ${most} datagrams`)
+  t.diagnostic(`${batches.length} tasks, at most ${most} datagrams in one`)
+})
+
 test('what waits goes out on a timer of one millisecond when nothing arrives, 128 datagrams each time', async (t) => {
   const { local, channel, handed } = await warmed(t, { sendBufferSize: 4 * MiB })
   // from here on nothing reaches the factory, and its timers fire when this test says so
@@ -121,7 +136,8 @@ test('what waits goes out on a timer of one millisecond when nothing arrives, 12
 })
 
 test('what waits goes out when a datagram arrives, with no timer: timers a page holds back do not hold the socket', async (t) => {
-  const { channel, handed } = await warmed(t, { sendBufferSize: 4 * MiB })
+  // arrivals in tasks of their own: the count never starts again in the task that has handed datagrams over
+  const { channel, handed } = await warmed(t, { sendBufferSize: 4 * MiB }, { task: true })
   const { setTimeout: timeout } = globalThis
   // a timer that never fires, for as long as this test looks; the factory is closed right after
   globalThis.setTimeout = () => 0
