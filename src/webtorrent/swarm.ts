@@ -116,7 +116,10 @@ export type Snapshot = {
   torrents: TorrentPeers[]
   /** Tracker messages that did not validate. */
   dropped: number
-  /** Connections the WebRTC class would not make: it had no slot then. Nothing more is made until the next announce. */
+  /**
+   * Connections the WebRTC class would not make. It had no slot then, which is no error: nothing more is asked
+   * of it until the next announce, and that one tries again.
+   */
   unmade: number
 }
 
