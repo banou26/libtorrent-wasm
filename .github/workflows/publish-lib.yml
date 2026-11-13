@@ -38,7 +38,8 @@ jobs:
 
       - run: npm ci
         env:
-          # tests/ is node --test over loopback sockets and the wasm engine, never a browser.
+          # tests/ is node --test over loopback sockets and the wasm engine. The one browser the
+          # WebRTC tests drive is the runner's own Chrome, so playwright downloads none.
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
 
       # `docker compose run` would build this on demand; doing it here keeps the image build
@@ -60,8 +61,20 @@ jobs:
           test -s dist/libtorrent.wasm
           grep -q _lt_session_create dist/libtorrent.js
 
-      # `npm run build` minus the compile above, split so each step's own exit code gates the run
-      # (chained behind a pipe, a tsc failure would be swallowed).
+      # The ./webrtc entry's stack is Rust, built by cargo alone for wasm32-wasip1 and nowhere near
+      # the engine or Emscripten. webrtc/rust-toolchain.toml names the release and the target, and
+      # rustup reads that file from the working directory, never from a --manifest-path.
+      - name: Install the Rust toolchain webrtc/ pins
+        working-directory: webrtc
+        run: rustup toolchain install
+
+      # Unpacks sctp-proto with webrtc/patches applied, then `cargo build --locked`, then copies
+      # webrtc.wasm into build/.
+      - name: Compile the WebRTC wasm
+        run: npm run webrtc-wasm
+
+      # `npm run build` minus the two compiles above, split so each step's own exit code gates the
+      # run (chained behind a pipe, a tsc failure would be swallowed).
       - run: npm run vite-build
       - run: npm run types
       # Puts dist/libtorrent.{js,wasm} beside the bundle, where build/index.js imports them.
@@ -73,6 +86,17 @@ jobs:
       # CI run. tests/forget-pieces-swarm.test.mjs stays local too: it needs transmission seeders,
       # which this runner does not have.
       - run: npm run test:ci
+
+      # ubuntu-24 refuses Chrome's sandbox to an unprivileged user namespace (AppArmor). Lifted for
+      # the run, rather than launching Chrome without its sandbox.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # The ./webrtc entry against libdatachannel (node-datachannel), against itself, and against
+      # the runner's Chrome. With CHROME_BIN set, a Chrome that is missing or does not launch fails
+      # the browser tests; without it they would be skipped.
+      - run: npm run test:webrtc
+        env:
+          CHROME_BIN: /usr/bin/google-chrome
 
       - name: Keep the tested artifact
         uses: actions/upload-artifact@v4
