@@ -153,16 +153,22 @@ test('destroying the session destroys the streams it still holds', async (t) => 
   assert.match(held.destroyError.message, /session was destroyed/)
 })
 
-test('a connection from a stream address is not counted as inbound', (t) => {
-  // an alert stream of two records (u32 type, u32 length, text), as the wrapper lays them out
-  const heap = new Uint8Array(1024)
+const TEXT_ALERT = 66
+const REC_PEERS = 0xf0000005
+
+const u32 = (value) => { const b = Buffer.alloc(4); b.writeUInt32LE(value); return b }
+const str = (text) => Buffer.concat([u32(Buffer.byteLength(text)), Buffer.from(text)])
+
+/**
+ * A Session over a module that is nothing but an alert stream: `records` are [type, body] pairs,
+ * laid out as the wrapper lays them out (u32 type, u32 length, body) and read by one popAlerts().
+ */
+const sessionOver = (t, records, mod = {}) => {
+  const heap = new Uint8Array(4096)
   let size = 0
-  for (const message of ['incoming connection from 100.64.3.9:6881 (TCP)', 'incoming connection from 192.0.2.7:51413 (uTP)']) {
-    const text = Buffer.from(message)
-    new DataView(heap.buffer).setUint32(size, 66, true)
-    new DataView(heap.buffer).setUint32(size + 4, text.length, true)
-    heap.set(text, size + 8)
-    size += 8 + text.length
+  for (const [type, body] of records) {
+    heap.set(Buffer.concat([u32(type), u32(body.length), body]), size)
+    size += 8 + body.length
   }
   const session = new Session({
     HEAPU8: heap,
@@ -174,11 +180,45 @@ test('a connection from a stream address is not counted as inbound', (t) => {
     _lt_alerts_size: () => size,
     _lt_alerts_data: () => 0,
     _lt_alerts_clear: () => { size = 0 },
+    ...mod,
   }, { tickIntervalMs: 1 << 30 })
   t.after(() => session.destroy())
+  return session
+}
+
+test('a connection from a stream address is not counted as inbound', (t) => {
+  const session = sessionOver(t, [
+    [TEXT_ALERT, Buffer.from('incoming connection from 100.64.3.9:6881 (TCP)')],
+    [TEXT_ALERT, Buffer.from('incoming connection from 192.0.2.7:51413 (uTP)')],
+  ])
   session.popAlerts()
   const reach = session.reachable()
   assert.equal(reach.inbound, 1)
   assert.deepEqual(reach.inboundByTransport, { utp: 1 })
   assert.equal(reach.lastInbound.endpoint, '192.0.2.7:51413')
+})
+
+test('the peer list says what carries each peer, and hides an address only inside 100.64.0.0/10', (t) => {
+  // a peer row as the wrapper writes it: endpoint, client, flags, then 60 bytes of counters
+  const row = (endpoint, flags = 0) => Buffer.concat([str(endpoint), str('client'), u32(flags), Buffer.alloc(60)])
+  const rows = [
+    row('192.0.2.7:51413'),
+    row('198.51.100.9:6881', PEER_FLAG.utpSocket),
+    // the address before the range, its first, its last, and the address after it
+    row('100.63.255.255:6881'),
+    row('100.64.0.0:6881'),
+    row('100.127.255.255:6881'),
+    row('100.128.0.0:6881'),
+  ]
+  const HANDLE = 7
+  const session = sessionOver(t, [[REC_PEERS, Buffer.concat([u32(HANDLE), u32(rows.length), ...rows])]])
+  session.popAlerts()
+  assert.deepEqual(session.lastPeers(HANDLE).map((p) => [p.endpoint, p.transport]), [
+    ['192.0.2.7:51413', 'tcp'],
+    ['198.51.100.9:6881', 'utp'],
+    ['100.63.255.255:6881', 'tcp'],
+    ['webrtc:0', 'webrtc'],
+    ['webrtc:4194303', 'webrtc'],
+    ['100.128.0.0:6881', 'tcp'],
+  ])
 })

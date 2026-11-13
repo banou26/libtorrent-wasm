@@ -54,3 +54,25 @@ test('a stream address in resume data is dropped on load, so a stream given that
     assert.ok(ms < 3000, `dialled ${Math.round(ms)} ms after addPeerStream`)
   }
 })
+
+test('resume data loses all of 100.64.0.0/10 and nothing on either side of it', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const first = await startEngine(defer, path.join(fx.root, 'first'))
+  const saved = await first.running(first.session.addTorrentFile(fx.meta.torrent, '/dl'))
+  const resume = bdecode(Buffer.from(await first.session.saveResumeData(saved)))
+
+  // the first and the last address of the range, then the address before it and the one after
+  const INSIDE = ['100.64.0.0', '100.127.255.255']
+  const OUTSIDE = ['100.63.255.255', '100.128.0.0']
+  resume.peers = Buffer.concat([...INSIDE, ...OUTSIDE].map((address) => compact(address, 6881)))
+  // paused, so nothing is dialled: a peer whose dial failed is not saved, whatever its address
+  resume.paused = 1
+  resume.auto_managed = 0
+  const { session } = await startEngine(defer, path.join(fx.root, 'second'))
+  const handle = session.addTorrentWithResume(bencode(resume), '/dl')
+  await waitFor('the paused torrent', () => { session.postStatus(handle); return session.status(handle)?.paused })
+
+  const again = bdecode(Buffer.from(await session.saveResumeData(handle)))
+  assert.deepEqual(endpoints(again.peers).sort(), OUTSIDE.map((address) => `${address}:6881`).sort())
+})
