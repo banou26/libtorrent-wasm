@@ -551,6 +551,36 @@ Events arrive through `addEventListener` and through the `on` handlers alike.
 - A connection no peer ever reaches stays `connecting`: close it on a timeout of
   your own.
 
+### Where a caller can tell it from Chrome
+
+One script run against Chrome 156's own `RTCPeerConnection` and against this
+entry, besides what the entry refuses:
+
+- **A peer that closes its connection.** Here its channels get `close` alone and
+  the connection is `failed` at once and for good. Chrome's channels get `error`
+  (`OperationError`) and then `close`, and its connection reads `disconnected`
+  about 5 s later.
+- **After `close()` on a connection** its channels read `closing` at once and
+  `send` throws `InvalidStateError`. Chrome's still read `open`, and `send`
+  returns, until their `close` event.
+- **A channel has no `closing` event.**
+- **On the answering side** `connectionstatechange` to `connecting` fires before
+  `setLocalDescription()` resolves. In Chrome it fires just after.
+- **`send` takes a string, an `ArrayBuffer` or a view.** A `Blob`, or anything
+  else, is a `TypeError`. Chrome sends a `Blob`, sends the text of anything else,
+  and sends an empty message.
+- **`sctp.maxMessageSize` is 262144 as soon as one description is set.** Chrome
+  says `Infinity` until both are.
+- **`bufferedamountlow` comes when the peer has acknowledged**, not when the
+  bytes leave, so it can come after an event Chrome would fire it before. A
+  message sent right before `channel.close()` gets none; Chrome fires one before
+  `close`.
+- **A description the stack refuses ends the connection** as `failed`. Chrome
+  rejects with the same error and leaves the connection as it was.
+- **Descriptions are set once.** Chrome also takes a second remote offer, a local
+  description set twice, one whose text was edited, and makes an offer with no
+  data channel. Here each of those rejects.
+
 ### Building it
 
 ```sh
