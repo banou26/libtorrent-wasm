@@ -23,7 +23,7 @@ import { streamPipe } from './rig/stream-pipe.mjs'
 const INSIDE = ['100.64.0.0', '100.127.255.255']
 const OUTSIDE = ['100.63.255.255', '100.128.0.0']
 // peers that exist nowhere, one for each peer that names one
-const NAMED = ['203.0.113.71', '203.0.113.72']
+const NAMED = ['203.0.113.71', '203.0.113.72', '203.0.113.73']
 
 /** An engine holding the fixture's torrent, on a host that carries loopback only and routes `OUTSIDE` to it. */
 const startCounted = async (defer) => {
@@ -74,7 +74,7 @@ const holepunchAfterNaming = async (host, peers) => {
   peers.forEach(({ peer }, i) => peer.sendPex([`${NAMED[i]}:6881`], PEX_HOLEPUNCH))
   // libtorrent tries a named peer over uTP, dials it about 5 s later, and asks whoever named it
   // for a rendezvous when that dial fails. The host refuses the dial as soon as it is asked.
-  await waitFor('the dial of each named peer', () => NAMED.every((address) => host.connects.some((c) => c.address === address)), 30_000)
+  await waitFor('the dial of each named peer', () => peers.every((_, i) => host.connects.some((c) => c.address === NAMED[i])), 30_000)
   for (const { peer } of peers) await roundTrip(peer)
   return peers.map(({ peer }) => peer.holepunch)
 }
@@ -93,12 +93,13 @@ test('a stream peer is never asked for a holepunch rendezvous, at either end of 
   assert.deepEqual(await holepunchAfterNaming(engine.host, peers), [[], []])
 })
 
-test('an ordinary peer is still asked for a holepunch rendezvous, up to either side of 100.64.0.0/10', async (t) => {
+test('an ordinary peer is still asked for a holepunch rendezvous: either side of 100.64.0.0/10, and on loopback', async (t) => {
   const defer = teardown(t)
   const engine = await startCounted(defer)
-  const peers = [await ordinaryPeer(defer, engine, OUTSIDE[0]), await ordinaryPeer(defer, engine, OUTSIDE[1])]
+  // loopback is local to libtorrent, as a stream address is, and the two beside the range are not
+  const peers = [await ordinaryPeer(defer, engine, OUTSIDE[0]), await ordinaryPeer(defer, engine, OUTSIDE[1]), await ordinaryPeer(defer, engine, '127.0.0.1')]
 
-  assert.deepEqual(await holepunchAfterNaming(engine.host, peers), NAMED.map((address) => [{ type: 'rendezvous', endpoint: `${address}:6881` }]))
+  assert.deepEqual(await holepunchAfterNaming(engine.host, peers), peers.map((_, i) => [{ type: 'rendezvous', endpoint: `${NAMED[i]}:6881` }]))
 })
 
 test('no holepunch message from a stream peer is acted on, and a rendezvous between ordinary peers is served', async (t) => {
