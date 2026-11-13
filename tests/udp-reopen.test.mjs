@@ -214,7 +214,8 @@ const makeRelayDgram = () => {
         sock.emit('listening')
       }, 30)
     }
-    sock.send = () => {}
+    sock.sent = 0
+    sock.send = () => { sock.sent++ }
     sock.close = () => {}
     sock.address = () => ({ address: '0.0.0.0', port: sock.granted, family: 'IPv4' })
     return sock
@@ -228,7 +229,7 @@ const STEP = 10
 const advance = (t, ms) => { for (let i = 0; i < ms / STEP; i++) t.mock.timers.tick(STEP) }
 
 const relayUdpState = (t, relay, wasm) => {
-  const { FKN } = loadShim(relay, wasm)
+  const { FKN, library, heap } = loadShim(relay, wasm)
   const st = { kind: 'udp', family: 'IPv4', nonblock: false, socket: null, udpRecv: [], reopenAttempts: 0 }
   FKN._dbgWorkerUdpPkts = 0; FKN._dbgWorkerUdpBytes = 0; FKN._dbgJsBusyUs = 0; FKN._dbgJsHandlerCalls = 0
   FKN.attachUdp(st)
@@ -238,7 +239,7 @@ const relayUdpState = (t, relay, wasm) => {
   t.after(() => settled(st))
   const drop = () => { st.socket.emit('error', new Error('WebVPN session closed')); st.socket.emit('close') }
   const healed = () => !st.dead && st.socket.granted != null
-  return { FKN, st, drop, healed }
+  return { FKN, library, heap, st, drop, healed }
 }
 
 test('a relay back after 20 s or 45 s is found within 2 s, on the port the fd held', (t) => {
@@ -300,6 +301,46 @@ test('a relay back after 90 s with the port free hands back the port the fd held
   for (let i = 0; i < 250 && !healed(); i++) t.mock.timers.tick(STEP)
   assert.ok(healed(), 'not back 2.5 s after the relay')
   assert.equal(st.localPort, 6882, 'a port nobody took was given up')
+})
+
+test('a replacement socket is neither writable nor written to until its bind is granted', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
+  const relay = makeRelayDgram()
+  const { FKN, library, heap, st, drop } = relayUdpState(t, relay)
+  const fd = FKN.newFd(st)
+  const view = new DataView(heap.buffer)
+  // a sockaddr_in for 192.0.2.1:6881, and a pollfd that asks whether the fd is writable
+  const to = 1024
+  heap[to] = 2
+  view.setUint16(to + 2, 6881, false)
+  heap.set([192, 0, 2, 1], to + 4)
+  const sendto = () => library.$FKN_sendto.call({}, fd, 2048, 16, 0, to, 16)
+  const pollfd = 4096
+  const writable = () => {
+    view.setInt32(pollfd, fd, true)
+    view.setInt16(pollfd + 4, 4, true)
+    library.$FKN_poll(pollfd, 1)
+    return (view.getInt16(pollfd + 6, true) & 4) !== 0
+  }
+
+  // the relay is away: the first replacement asks for its bind 250 ms after the drop and is refused 30 ms on
+  relay.away = true
+  drop()
+  advance(t, 250)
+  const refused = st.socket
+  assert.equal(relay.binds.length, 2, 'the first replacement has not asked for its bind')
+  assert.deepEqual([sendto(), writable()], [-FKN.err.AGAIN, false], 'a replacement that waits for its bind took a send, or read writable')
+  advance(t, 30)
+
+  // the relay is back: the second one asks 1 s later and is granted 30 ms on
+  relay.away = false
+  advance(t, 1000)
+  const granted = st.socket
+  assert.notEqual(granted, refused)
+  assert.deepEqual([sendto(), writable()], [-FKN.err.AGAIN, false], 'a replacement that waits for its bind took a send, or read writable')
+  advance(t, 30)
+  assert.deepEqual([sendto(), writable()], [16, true], 'the replacement that was granted its bind is not written to')
+  assert.deepEqual([refused.sent, granted.sent], [0, 1])
 })
 
 /** A socket on a relay that can be taken away, and the calls it makes into the engine, timed. */

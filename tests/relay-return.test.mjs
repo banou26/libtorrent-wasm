@@ -69,8 +69,8 @@ const swarm = async (t, behind) => {
     const back = await relayed.next('the relay back', (r) => r.restoreAt >= asked, 8)
     return { before, back, done: leech.last().done }
   }
-  const resumed = async ({ back, done }) => {
-    const moving = await leech.next('bytes after the relay came back', (r) => r.done > done, RESUME_MS / 250)
+  const resumed = async ({ back, done }, ms = RESUME_MS) => {
+    const moving = await leech.next('bytes after the relay came back', (r) => r.done > done, ms / 250)
     t.diagnostic(`bytes again ${moving.at - back.restoreAt} ms after the relay came back`)
     return moving
   }
@@ -112,6 +112,15 @@ describe('a relay that comes back after 22 s', { concurrency: true }, () => {
   it('a seed behind it serves a peer that dialled in again within 10 s', async (t) => {
     const { outage, resumed } = await swarm(t, 'seed')
     await resumed(await outage(OUTAGE_MS))
+  })
+
+  // The seed's resends come 11.8 s and 21.0 s after its last acknowledged packet, and its socket is back
+  // 15.5 s after the drop. A replacement socket that could be written to before its bind was granted took
+  // the resend that waited for it at 13.5 s, while the relay was away: lost, and counted as sent, so the
+  // next one came at 21.0 s, 7 s after the relay.
+  it('a seed behind it for 14 s resends as its socket comes back, and serves that peer within 5 s', async (t) => {
+    const { outage, resumed } = await swarm(t, 'seed')
+    await resumed(await outage(14_000), 5_000)
   })
 
   // two outages take 63 s, past the 60 s the suite gives a test

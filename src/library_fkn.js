@@ -125,10 +125,10 @@ addToLibrary({
           out.push({
             transport: 'udp',
             port: st.localPort ?? null,
-            // a udp socket has no accept step, so `dead` (set by reopenUdp, cleared by attachUdp) is
-            // the whole of its liveness
+            // a udp socket has no accept step, so `dead` (set by reopenUdp, cleared when a replacement
+            // is listening) is the whole of its liveness
             up: !st.dead,
-            healing: !!st.reopening,
+            healing: !!st.dead,
             attempts: st.reopenAttempts || 0,
           })
         }
@@ -363,7 +363,14 @@ addToLibrary({
     attachUdp(st, adopt) {
       const sock = adopt || FKN.dgram.createSocket({ type: st.family === 'IPv6' ? 'udp6' : 'udp4' })
       st.socket = sock
-      st.dead = false
+      // A replacement is nothing to write to until its bind is granted ('listening'), and while the
+      // relay is away every one is refused. Counted as live from here, the fd read writable for that
+      // moment, libtorrent wrote the uTP resends that were waiting for it into a socket with no port,
+      // and each was lost and told as sent, so the connection resent on its next timeout and not when
+      // the socket came back. Measured with a seed behind a relay away 22 s and a peer that had
+      // dialled in: no byte within 12 s of the relay's return in the 2 runs of 25 where a datagram
+      // went to the last refused replacement, 1.8 to 3.6 s in the other 23.
+      st.dead = !!st.bound && !adopt
 
       // Every handler below is guarded on identity, because they close over the STATE and the state
       // outlives the socket: a reopen or an adoption replaces st.socket while the old socket is
@@ -403,6 +410,7 @@ addToLibrary({
         const a = sock.address()
         st.localAddr = a.address; st.localPort = a.port; st.localFamily = a.family
         if (st.homePort == null) st.homePort = a.port
+        st.dead = false
         // a healed socket starts its backoff over, so a later drop is not punished for this one
         st.reopenAttempts = 0
         if (st.outageAt != null) {
@@ -534,11 +542,10 @@ addToLibrary({
       if (!ep) return -FKN.err.INVAL
       // dropped, and reported as sent
       if (FKN.isStreamAddress(ep)) return len
-      // EAGAIN is the honest answer while the socket is being replaced; reporting a send as delivered over a socket that is gone makes the loss invisible
-      if (st.dead || !st.socket) {
-        FKN.reopenUdp(st, 'send-on-dead')
-        return -FKN.err.AGAIN
-      }
+      // EAGAIN is the honest answer while the socket is being replaced, a replacement that waits for
+      // its bind included: reporting a send as delivered over a socket that is gone makes the loss
+      // invisible. A reopen is under way whenever `dead` is set, so none is asked for here.
+      if (st.dead) return -FKN.err.AGAIN
       try {
         st.socket.send(read(), 0, len, ep.port, ep.address)
       } catch (e) {
