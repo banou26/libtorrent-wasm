@@ -951,19 +951,28 @@ test('with the relay flag an address that was an ordinary peer earlier in the se
   assert.equal(JSON.stringify(r.peers.snapshot()).includes('198.51.100'), false, 'what the swarm reports names no address')
 })
 
-test('with the relay flag a channel whose remote closed it while the ordinary peers were read is not handed over, and its remote is silent like any other', async t => {
+test('with the relay flag a channel whose remote closed it while the ordinary peers were read is not handed over, and its remote is silent or not like any other', async t => {
   const r = rig(t, { relay: true })
   await r.start(1)
   let answer
   r.session.peers = () => new Promise(resolve => { answer = resolve })
-  const remote = from(r, '198.51.100.7')
-  assert.equal(await remote.connect(1), true)
-  remote.sockets[0].destroy()
-  await settle()
-  answer([])
-  await settle()
-  assert.equal(r.session.streams.length, 0)
-  assert.equal(r.peers.snapshot().torrents[0].silent, 1, 'it ended its channel without a byte')
+  /** A remote whose channel opens and is closed by it before the engine has said where its ordinary peers are. */
+  const closedDuringTheRead = async (address, speaks) => {
+    const remote = from(r, address)
+    assert.equal(await remote.connect(1), true)
+    if (speaks) remote.sockets[0].write(Buffer.of(19))
+    await settle()
+    remote.sockets[0].destroy()
+    await settle()
+    answer([])
+    await settle()
+    return remote
+  }
+  const told = () => [r.session.streams.length, r.peers.snapshot().torrents[0].silent]
+  await closedDuringTheRead('198.51.100.8', true)
+  assert.deepEqual(told(), [0, 0], 'it had sent a byte: no stream is handed over, and it is not silent')
+  const remote = await closedDuringTheRead('198.51.100.7', false)
+  assert.deepEqual(told(), [0, 1], 'it had sent none: no stream either, and it is silent')
 
   r.session.peers = async () => []
   await advance(t, 61 * SECOND, SECOND)
