@@ -162,3 +162,22 @@ test('only 100.64.0.0/10 stays in the shim: the address on either side of it goe
   // a dial with no stream behind it is refused, and a dropped datagram reads as sent
   assert.deepEqual(answers, [[0, 20], [-ECONNREFUSED, 20], [-ECONNREFUSED, 20], [0, 20]])
 })
+
+test('a datagram of several buffers leaves as one, and is dropped or held as a datagram of one is', (t) => {
+  const udpSocket = datagramSocket()
+  const { library, FKN, heap, sockaddr, sendmsg } = loadShim({ storage: null, net: {}, dgram: { createSocket: () => udpSocket } })
+  t.after(() => FKN.teardown())
+  const fd = library.__syscall_socket(AF_INET, SOCK_DGRAM, 0)
+  heap.set(Buffer.from('headpayload'), 1024)
+
+  assert.equal(sendmsg(fd, [4, 7], sockaddr('198.51.100.3', 6881)), 11)
+  assert.deepEqual(udpSocket.sent, [{ text: 'headpayload', port: 6881, address: '198.51.100.3' }])
+
+  assert.equal(sendmsg(fd, [4, 7], sockaddr('100.64.0.1', 6881)), 11, 'a dropped datagram reads as sent')
+  assert.equal(udpSocket.sent.length, 1, 'a datagram to a stream address reached the host')
+
+  // the socket under the fd has gone, and the one that replaces it is not there yet
+  udpSocket.emit('close')
+  assert.equal(sendmsg(fd, [4, 7], sockaddr('198.51.100.3', 6881)), -EAGAIN)
+  assert.equal(udpSocket.sent.length, 1, 'a datagram was sent through a socket that had closed')
+})
