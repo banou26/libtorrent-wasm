@@ -31,15 +31,15 @@ const handle = role === 'seed'
 
 let dropAt = null
 let restoreAt = null
-// uTP headers (BEP 29): type in the high nibble of byte 0, connection id at 2, ack_nr at 18. The last
-// one sent to each peer before the first drop, and every reset sent after a restore.
+// uTP headers (BEP 29): type in the high nibble of byte 0, connection id at 2, seq_nr at 16, ack_nr at
+// 18. The last one sent to each peer before the first drop, and every reset sent after a restore.
 const lastBefore = {}
 const resets = []
 if (relay) {
   relay.onSend = (bytes, address, port) => {
     if (bytes.length < 20 || (bytes[0] & 0x0f) !== 1) return
     const view = new DataView(bytes.buffer, bytes.byteOffset, 20)
-    const header = { to: `${address}:${port}`, type: bytes[0] >> 4, id: view.getUint16(2), ack: view.getUint16(18) }
+    const header = { to: `${address}:${port}`, type: bytes[0] >> 4, id: view.getUint16(2), seq: view.getUint16(16), ack: view.getUint16(18) }
     if (dropAt == null) lastBefore[header.to] = header
     else if (restoreAt != null && header.type === 3) resets.push(header)
   }

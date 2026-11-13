@@ -1461,8 +1461,12 @@ LT_API int lt_torrent_forget_pieces(std::uint32_t id, std::int32_t const* pieces
 // The reset is what lets a new connection in: a remote keeps its side of the old one until its own
 // resends give up and turns a second connection from us away meanwhile. Against 4 transmission
 // seeders, alternated: bytes again 4.0 to 4.5 s after the relay with the reset, 4.5 to 12.0 s
-// without it (4 runs each). A libtorrent remote also takes the FIN the disconnect sends, so on two
-// of these engines the reset changes nothing.
+// without it (4 runs each). A libtorrent remote also takes the FIN the disconnect sends, but only
+// after every packet of ours it never got, and those are resent on a timer the outage has backed
+// off. With such packets (tests/rig/rel-outage.mjs --queued, a relay away 20 s, alternated): no
+// uTP byte within 40 s in 4 of 12 runs while the reset carried upstream's random sequence number,
+// which a libtorrent remote drops when it lies past its reorder window, and in 0 of 12 since
+// patch 0015 numbers it.
 //
 // A peer that dialled in over uTP is left alone: its source port is its listen port, so libtorrent
 // never marks it connectable (peer_list.cpp update_peer_port) and nothing would dial it back, while

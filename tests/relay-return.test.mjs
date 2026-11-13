@@ -89,10 +89,13 @@ describe('a relay that comes back after 22 s', { concurrency: true }, () => {
     assert.ok(now.portOpen, `the port was given up: ${JSON.stringify(now.listeners)}`)
     assert.deepEqual(now.listeners.map((l) => l.port), [before.port, before.port])
 
-    // A transmission seed keeps its side of the old connection and turns a redial away until that
-    // reset, which it matches on the id our packets carried. A libtorrent one also checks the ack, but
-    // takes the FIN of our disconnect as well, so here only what the reset says can be checked; its
-    // effect shows against transmission (tests/rig/relay-outage.mjs).
+    // A remote keeps its side of the old connection and turns a redial away until that reset. A
+    // transmission one matches it on the id our packets carried. A libtorrent one also checks the ack,
+    // and drops a reset numbered past its reorder window, which starts at the last packet it got and
+    // is 16 packets or longer. Unless it missed a packet of ours it takes the FIN of our disconnect as
+    // well, so here only what the reset says can be checked; its effect shows against transmission
+    // (tests/rig/relay-outage.mjs) and with packets sent into the outage (tests/rig/rel-outage.mjs
+    // --queued).
     const seedAt = `127.0.0.1:${seeding.port}`
     const last = now.lastBefore[seedAt]
     assert.ok(last, `no uTP packet went to the seed before the outage: ${JSON.stringify(now.lastBefore)}`)
@@ -100,6 +103,9 @@ describe('a relay that comes back after 22 s', { concurrency: true }, () => {
     assert.ok(reset, `no reset went to the seed after the relay came back: ${JSON.stringify(now.resets)}`)
     assert.equal(reset.id, last.id, 'the reset names another connection')
     assert.ok(((reset.ack - last.ack) & 0xffff) < 64, `the reset acknowledges ${reset.ack}, the connection was at ${last.ack}`)
+    // a state packet (type 2) carries the number of the connection's next packet, any other its own
+    const next = (last.seq + (last.type === 2 ? 0 : 1)) & 0xffff
+    assert.ok(((next - reset.seq) & 0xffff) < 64, `the reset is numbered ${reset.seq}, the connection's next packet was ${next}`)
   })
 
   // the leech dialled the seed over uTP, so the seed cannot dial it back and has to keep the connection

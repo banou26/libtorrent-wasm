@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Banou <me@banou.dev>
+Date: Sat, 14 Nov 2026 05:00:00 +0900
+Subject: [PATCH] fix: a uTP reset is numbered where a libtorrent remote takes it
+
+---
+diff --git a/src/utp_stream.cpp b/src/utp_stream.cpp
+--- a/src/utp_stream.cpp
++++ b/src/utp_stream.cpp
+@@ -1153,7 +1153,10 @@
+ 	h.connection_id = m_send_id;
+ 	h.timestamp_difference_microseconds = 1;  // WASM hack - see other sites
+ 	h.wnd_size = 0;
+-	h.seq_nr = std::uint16_t(random(0xffff));
++	// WASM patch: the first sequence number the remote has not acknowledged, where upstream sends a
++	// random one. A libtorrent remote drops a packet numbered past its reorder window before it
++	// looks at the type (incoming_packet), which is about half of all random numbers.
++	h.seq_nr = std::uint16_t((m_acked_seq_nr + 1) & ACK_MASK);
+ 	h.ack_nr = ack_nr;
+ 	time_point const now = clock_type::now();
+ 	h.timestamp_microseconds = std::uint32_t(
