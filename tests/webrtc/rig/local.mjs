@@ -32,18 +32,19 @@ export async function listen(options = {}) {
   }
 }
 
-export const once = (target, type, ms = 30_000) =>
-  new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`no '${type}' event in ${ms} ms`)), ms)
-    target.addEventListener(
-      type,
-      (event) => {
-        clearTimeout(timer)
-        resolve(event)
-      },
-      { once: true },
-    )
+/** The next `type` event of `target`, with no deadline: `within` gives the wait one. */
+export const heard = (target, type) => new Promise((resolve) => target.addEventListener(type, resolve, { once: true }))
+
+/** `promise`, or a rejection with `message` once `ms` have passed since this call. */
+export function within(promise, ms, message) {
+  let timer
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms)
   })
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer))
+}
+
+export const once = (target, type, ms = 30_000) => within(heard(target, type), ms, `no '${type}' event in ${ms} ms`)
 
 /** The description once gathering is complete, which is what non-trickle signalling sends. */
 export async function gathered(pc) {
@@ -60,23 +61,27 @@ export async function gathered(pc) {
   return { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
 }
 
-/** Connects `pc` and a libdatachannel remote, with either side offering, and returns our open channel. */
+/**
+ * Connects `pc` and a libdatachannel remote, with either side offering, and returns our open
+ * channel. The channel is listened for from the start and timed from the moment it can come, so
+ * a connect that stalls says at which stage.
+ */
 export async function connect(pc, remote, { offer, label = 'test' }) {
   let channel
   if (offer) {
     channel = pc.createDataChannel(label)
-    const opened = once(channel, 'open')
+    const opened = heard(channel, 'open')
     await pc.setLocalDescription()
     remote.send({ t: 'remote', ...(await gathered(pc)) })
     await pc.setRemoteDescription(await remote.next('description'))
-    await opened
+    await within(opened, 30_000, 'both descriptions are set and our channel did not open in 30 s')
   } else {
-    const announced = once(pc, 'datachannel')
+    const announced = heard(pc, 'datachannel')
     remote.send({ t: 'offer', label })
     await pc.setRemoteDescription(await remote.next('description'))
     await pc.setLocalDescription()
     remote.send({ t: 'remote', ...(await gathered(pc)) })
-    channel = (await announced).channel
+    channel = (await within(announced, 30_000, 'the remote was sent our answer and announced no channel in 30 s')).channel
   }
   const opened = await remote.next('open')
   return { channel, opened }

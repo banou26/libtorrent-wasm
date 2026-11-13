@@ -2,7 +2,7 @@
 import { execFileSync } from 'node:child_process'
 import http from 'node:http'
 import { chromium } from 'playwright'
-import { gathered, once } from './local.mjs'
+import { gathered, heard, within } from './local.mjs'
 
 /** CHROME_BIN, or the first Chrome on the PATH, or undefined. */
 export function findChrome() {
@@ -88,7 +88,7 @@ export async function chromeRemote(page) {
       let channel
       if (offer) {
         channel = pc.createDataChannel(label)
-        const opened = once(channel, 'open')
+        const opened = heard(channel, 'open')
         await pc.setLocalDescription()
         const answer = await page.evaluate(async (description) => {
           await pc.setRemoteDescription(description)
@@ -96,9 +96,9 @@ export async function chromeRemote(page) {
           return gathered()
         }, await gathered(pc))
         await pc.setRemoteDescription(answer)
-        await opened
+        await within(opened, 30_000, 'both descriptions are set and our channel did not open in 30 s')
       } else {
-        const announced = once(pc, 'datachannel')
+        const announced = heard(pc, 'datachannel')
         const theirs = await page.evaluate(async (label) => {
           wire(pc.createDataChannel(label))
           await pc.setLocalDescription()
@@ -107,7 +107,7 @@ export async function chromeRemote(page) {
         await pc.setRemoteDescription(theirs)
         await pc.setLocalDescription()
         await page.evaluate((description) => pc.setRemoteDescription(description), await gathered(pc))
-        channel = (await announced).channel
+        channel = (await within(announced, 30_000, 'Chrome was given our answer and announced no channel in 30 s')).channel
       }
       await page.evaluate(() => opened)
       return channel
