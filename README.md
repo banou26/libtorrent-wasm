@@ -185,6 +185,9 @@ What it refuses:
   over once it is open, for a torrent that is running.
 - It does no signalling. Finding the remote, opening the stream and opening
   another after it closes are the caller's.
+- It does not rewrite alerts. An alert's text is libtorrent's own and names the
+  peer by its made-up address, so an address in `100.64.0.0/10` there is
+  nobody's.
 
 ### A session with no relay
 

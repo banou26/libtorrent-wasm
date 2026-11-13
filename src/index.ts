@@ -207,6 +207,11 @@ export interface PieceBitfield {
 
 export interface Alert {
   type: number
+  /**
+   * libtorrent's own text, unchanged. It names a peer by its address, so it names a `webrtc` peer
+   * by the address {@link Session.addPeerStream} made up for it, which {@link PeerInfo.endpoint}
+   * hides: an address in 100.64.0.0/10 here is nobody's, and is not to be shown as a peer's.
+   */
   message: string
 }
 
@@ -700,7 +705,8 @@ export class Session {
    *
    * No address is given twice before all 4,194,304 have been used, and none is ever handed to the
    * host's `net` or `dgram`, written to resume data, or sent in peer exchange. The peer list shows
-   * such a peer as `webrtc` ({@link PeerInfo.transport}).
+   * such a peer as `webrtc` ({@link PeerInfo.transport}); the text of an alert about it still
+   * carries the address ({@link Alert.message}).
    */
   addPeerStream(handle: number, socket: PeerStreamSocket): { address: string, port: number } {
     const index = this.nextStream
