@@ -8,7 +8,7 @@
 //   dropAt?: ms after the session starts at which the udp socket and the tcp listener go away
 //   dropWith?: 'error+close' (default) or 'close'
 //   dialWhileDead?: an endpoint for the magnet's x.pe, the magnet added during the third wait for
-//     a replacement udp socket (3 s), since libtorrent makes the dial about a second after the add
+//     a replacement udp socket (2 s), since libtorrent makes the dial about a second after the add
 // }
 
 import { EventEmitter } from 'node:events'

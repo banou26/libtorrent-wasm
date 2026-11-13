@@ -218,6 +218,36 @@ port that cannot exist.
 `dnsLookup` is an option of `createSession` on its own too. Without one the
 engine resolves names over HTTPS at 1.1.1.1, from the page's own network.
 
+## When the relay goes away
+
+A relay that restarts, or a connection to it that drops, ends the engine's UDP
+socket and its TCP listener. The socket layer keeps both fds and opens new
+sockets under them, so libtorrent never sees the outage:
+
+- It retries after 250 ms, 1 s, then every 2 s, so a relay that is back is
+  found within 2 s.
+- Each retry asks for the port the socket first held, the one trackers, peer
+  exchange and the DHT were given and the one `reachable().port` names. Only
+  an outage older than a minute (`KEEP_PORT_MS`) takes any free port instead,
+  for a number somebody else took meanwhile. That port is then not announced
+  anywhere, and `reachable().portOpen` reads false.
+- When the UDP socket comes back after more than 3 s (`REDIAL_AFTER_MS`), every
+  uTP peer is sent a reset and dialled again, 2 s later unless it has dialled
+  us back first. A remote keeps its side of the old connection until its own
+  resends give up and refuses a second one from us meanwhile, so the reset is
+  what lets the new one in. A shorter outage leaves the connections alone:
+  every remote is still resending, and they carry on by themselves.
+- `reachable().listeners` reads `healing` from the drop until each socket is
+  back.
+
+Measured with `tests/rig/relay-outage.mjs` (4 transmission seeders at 100 kB/s,
+the relay away 20 s at 20% of a 30 MB download, a reader in the file): bytes
+moved again 4.0 to 6.0 s after the relay was back, on the same port (7 runs).
+Before, libtorrent kept the dead connections until uTP gave up on its resends
+(194 to 197 s after the drop), waited `min_reconnect_time` (60 s) to dial again,
+and the bytes came back 237 to 240 s after the relay, on two new ports. With the
+relay away 1 s, the connections carried on and bytes moved again 1.0 s after it.
+
 ## WebRTC peers
 
 Two optional entries find WebRTC peers through WebSocket trackers and hand each open data channel to libtorrent as
