@@ -334,13 +334,14 @@ addToLibrary({
     UDP_REOPEN_DELAYS: [250, 1000, 2000],
 
     /**
-     * The outage past which a healed udp socket has its uTP peers reset and dialled again. A shorter
-     * one leaves connections that carry on by themselves, every remote still resending: measured,
-     * bytes again 0.95 s after a relay away for 1 s with the connections kept, 5.4 to 6.5 s with the
-     * redial. A longer one may outlast a remote's side of them (libtorrent's defaults resend last 4.5 s
-     * into the silence), and a connection kept past that sits until our own uTP gives up, about 196 s.
+     * The outage past which a healed udp socket has its uTP peers reset and dialled again. The reopen
+     * heals 0.25, 1.25, 3.25 or 5.25 s after the drop, so a relay back within about 3 s leaves the
+     * connections alone, and they carry on by themselves, every remote still resending: measured,
+     * bytes again 0.95 s after a relay away for 1 s and 2.2 s after one away for 2 s with the
+     * connections kept, against 5.4 to 6.5 s and 4.4 to 5.2 s with the redial. Each resend backs off
+     * further, so a connection kept through a longer outage waits about as long again for its next one.
      */
-    REDIAL_AFTER_MS: 3000,
+    REDIAL_AFTER_MS: 4000,
 
     // how long a healed udp socket has to stay up before the peers it cut are dialled again
     // (wrapper.cpp, lt_session_redial_cut_peers)

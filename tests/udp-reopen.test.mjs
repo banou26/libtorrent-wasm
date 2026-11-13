@@ -309,11 +309,11 @@ const redialRig = (t) => {
   return { ...rig, calls, outage }
 }
 
-test('a socket back after more than REDIAL_AFTER_MS cuts its uTP peers, once, and a blip or a first bind does not', (t) => {
+test('a socket back after more than REDIAL_AFTER_MS cuts its uTP peers, once, and a relay back within 3 s or a first bind does not', (t) => {
   const { FKN, calls, outage } = redialRig(t)
   assert.deepEqual(calls, [], 'the first bind cut its peers')
 
-  for (const [awayMs, cut] of [[5_000, true], [1_000, false], [20_000, true]]) {
+  for (const [awayMs, cut] of [[5_000, true], [1_000, false], [2_000, false], [3_000, false], [20_000, true]]) {
     const from = calls.length
     const healedAt = outage(awayMs)
     advance(t, FKN.REDIAL_WAIT_MS + STEP)
