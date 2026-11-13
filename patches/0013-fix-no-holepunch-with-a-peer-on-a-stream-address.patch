@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Banou <me@banou.dev>
+Date: Fri, 13 Nov 2026 17:00:00 +0900
+Subject: [PATCH] fix: no holepunch with a peer on a stream address
+
+---
+diff --git a/src/bt_peer_connection.cpp b/src/bt_peer_connection.cpp
+index dfb4390ba..42726bb14 100644
+--- a/src/bt_peer_connection.cpp
++++ b/src/bt_peer_connection.cpp
+@@ -2022,6 +2022,13 @@ namespace {
+ 			m_upload_only_id = std::uint8_t(m.dict_find_int_value("upload_only", 0));
+ 			m_holepunch_id = std::uint8_t(m.dict_find_int_value("ut_holepunch", 0));
+ 			m_dont_have_id = std::uint8_t(m.dict_find_int_value("lt_donthave", 0));
++			// WASM patch: a peer on a made-up stream address (100.64.0.0/10) is read as having no
++			// ut_holepunch, so it is never asked for a rendezvous and one it asks for is not
++			// served. Either hands a third peer an address: ours, from a libtorrent 2.1
++			// introducer (that peer then leaves our stream to it silent), or the made-up one.
++			address const& a = remote().address();
++			if (a.is_v4() && (a.to_v4().to_uint() & 0xffc00000) == 0x64400000)
++				m_holepunch_id = 0;
+ 		}
+ 
+ 		// there is supposed to be a remote listen port

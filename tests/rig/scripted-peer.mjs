@@ -11,9 +11,19 @@ import { PROTOCOL } from './peer-handshake.mjs'
 const MSG = {
   unchoke: 1, interested: 2, request: 6, piece: 7, haveAll: 14, haveNone: 15, reject: 16, extended: 20,
 }
-// the ids this peer asks the engine to use for the lt_donthave and ut_pex messages it sends
+// the ids this peer asks the engine to use for the lt_donthave, ut_pex and ut_holepunch messages it sends
 const DONT_HAVE_ID = 7
 const PEX_ID = 8
+const HOLEPUNCH_ID = 9
+// BEP 55
+const HOLEPUNCH_TYPE = ['rendezvous', 'connect', 'failed']
+/** pex flag (BEP 11 as libtorrent extends it): the named peer supports ut_holepunch. */
+export const PEX_HOLEPUNCH = 0x08
+
+const compactEndpoint = (endpoint) => {
+  const [address, port] = endpoint.split(':')
+  return Buffer.from([...address.split('.').map(Number), port >> 8, port & 0xff])
+}
 
 const frame = (id, payload = Buffer.alloc(0)) => {
   const b = Buffer.allocUnsafe(5 + payload.length)
@@ -44,8 +54,11 @@ export class ScriptedPeer {
   dontHave = []
   /** The bencoded payload of every ut_pex message the engine sent. */
   pex = []
-  /** The id the engine reads ut_pex under, null until its extension handshake has arrived. */
+  /** Every ut_holepunch message the engine sent, as { type, endpoint } with an IPv4 `address:port`. */
+  holepunch = []
+  /** The ids the engine reads ut_pex and ut_holepunch under, null until its extension handshake has arrived. */
   enginePexId = null
+  engineHolepunchId = null
   #socket = null
   #serve
   #reqq
@@ -86,7 +99,7 @@ export class ScriptedPeer {
           shookHands = true
           socket.write(frame(MSG.extended, Buffer.concat([
             Buffer.from([0]),
-            Buffer.from(`d1:md11:lt_donthavei${DONT_HAVE_ID}e6:ut_pexi${PEX_ID}ee${this.#reqq ? `4:reqqi${this.#reqq}e` : ''}e`),
+            Buffer.from(`d1:md11:lt_donthavei${DONT_HAVE_ID}e12:ut_holepunchi${HOLEPUNCH_ID}e6:ut_pexi${PEX_ID}ee${this.#reqq ? `4:reqqi${this.#reqq}e` : ''}e`),
           ])))
           if (this.#serve) socket.write(Buffer.concat([frame(MSG.haveAll), frame(MSG.unchoke)]))
           else socket.write(Buffer.concat([frame(MSG.haveNone), frame(MSG.interested)]))
@@ -111,17 +124,25 @@ export class ScriptedPeer {
     this.#socket.write(frame(MSG.piece, Buffer.concat([u32s(piece, offset), data])))
   }
 
-  /** Names peers to the engine in a ut_pex message, as IPv4 `address:port` strings. */
-  sendPex(added) {
-    const compact = Buffer.concat(added.map((endpoint) => {
-      const [address, port] = endpoint.split(':')
-      return Buffer.from([...address.split('.').map(Number), port >> 8, port & 0xff])
-    }))
+  /** Names peers to the engine in a ut_pex message, as IPv4 `address:port` strings, each with `flags`. */
+  sendPex(added, flags = 0) {
+    const compact = Buffer.concat(added.map(compactEndpoint))
     this.#socket.write(frame(MSG.extended, Buffer.concat([
       Buffer.from([this.enginePexId]),
       Buffer.from(`d5:added${compact.length}:`), compact,
-      Buffer.from(`7:added.f${added.length}:`), Buffer.alloc(added.length),
+      Buffer.from(`7:added.f${added.length}:`), Buffer.alloc(added.length, flags),
       Buffer.from('e'),
+    ])))
+  }
+
+  /**
+   * Sends a ut_holepunch message about the peer at `endpoint`: `rendezvous` asks the engine to
+   * introduce this peer to it, `connect` tells the engine to dial it.
+   */
+  sendHolepunch(type, endpoint) {
+    this.#socket.write(frame(MSG.extended, Buffer.concat([
+      Buffer.from([this.engineHolepunchId, HOLEPUNCH_TYPE.indexOf(type), 0]),
+      compactEndpoint(endpoint),
     ])))
   }
 
@@ -135,11 +156,19 @@ export class ScriptedPeer {
     else if (id === MSG.reject) {
       this.rejects.push({ piece: payload.readUInt32BE(0), offset: payload.readUInt32BE(4), length: payload.readUInt32BE(8) })
     } else if (id === MSG.extended && payload[0] === 0) {
-      this.enginePexId = bdecode(payload.subarray(1)).m?.ut_pex ?? null
+      const { m } = bdecode(payload.subarray(1))
+      this.enginePexId = m?.ut_pex ?? null
+      this.engineHolepunchId = m?.ut_holepunch ?? null
     } else if (id === MSG.extended && payload[0] === DONT_HAVE_ID) {
       this.dontHave.push(payload.readUInt32BE(1))
     } else if (id === MSG.extended && payload[0] === PEX_ID) {
       this.pex.push(Buffer.from(payload.subarray(1)))
+    } else if (id === MSG.extended && payload[0] === HOLEPUNCH_ID) {
+      // type, address family (0 is IPv4), then the compact endpoint
+      this.holepunch.push({
+        type: HOLEPUNCH_TYPE[payload[1]],
+        endpoint: `${payload.subarray(3, 7).join('.')}:${payload.readUInt16BE(7)}`,
+      })
     } else if (id === MSG.request && this.#serve) {
       const piece = payload.readUInt32BE(0)
       const offset = payload.readUInt32BE(4)

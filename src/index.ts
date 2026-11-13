@@ -538,7 +538,7 @@ export interface ReadOptions {
 // 100.64.0.0/10 (shared address space, RFC 6598), where addPeerStream takes its addresses from.
 // libtorrent counts the range as local, so a remote ignores one as a vote on its own address and
 // patch 0011 keeps it out of peer exchange, yet it is not in the class libtorrent never chokes.
-// wrapper.cpp and library_fkn.js test the same range.
+// wrapper.cpp, library_fkn.js and patch 0013 test the same range.
 const STREAM_ADDRESSES = 1 << 22
 const STREAM_PORT = 6881
 const STREAM_DIAL_TIMEOUT_MS = 10_000
@@ -705,9 +705,9 @@ export class Session {
    * over once it is open, for a torrent that is running.
    *
    * No address is given twice before all 4,194,304 have been used, and none is ever handed to the
-   * host's `net` or `dgram`, written to resume data, or sent in peer exchange. The peer list shows
-   * such a peer as `webrtc` ({@link PeerInfo.transport}); the text of an alert about it still
-   * carries the address ({@link Alert.message}).
+   * host's `net` or `dgram`, written to resume data, or sent in peer exchange or a holepunch
+   * message. The peer list shows such a peer as `webrtc` ({@link PeerInfo.transport}); the text of
+   * an alert about it still carries the address ({@link Alert.message}).
    */
   addPeerStream(handle: number, socket: PeerStreamSocket): { address: string, port: number } {
     const index = this.nextStream

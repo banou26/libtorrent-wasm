@@ -171,8 +171,8 @@ What it promises:
 
 - The address stays inside the engine. A connect or a datagram to the range
   never reaches `net` or `dgram` (a dial with no stream behind it is refused in
-  memory), resume data is written and loaded without it, and peer exchange does
-  not send it (patch 0011).
+  memory), resume data is written and loaded without it, peer exchange does
+  not send it (patch 0011), and no holepunch message names it (patch 0013).
 - No address is given twice before all 4,194,304 have been used.
 - The peer list shows the peer with `transport: 'webrtc'` and an `endpoint`
   that is not an address, and `reachable().inbound` never counts it.
@@ -255,3 +255,4 @@ rerun `make apply-patches`; rejected hunks must be reconciled manually.
 | 0010 | `forget_pieces`, for a streaming storage that dropped a piece's bytes. |
 | 0011 | Peer exchange neither sends local addresses, which mean nothing to a peer outside that network, nor takes them from a peer. That covers the addresses `addPeerStream` makes up, and the local addresses a stream peer could otherwise name for the engine to dial. |
 | 0012 | A peer's `reqq` lowers the request queue and never raises it past `max_out_request_queue`, so no peer is asked for more than 5000 blocks at once, 78 MiB. The receive bound of a peer stream is sized from that. |
+| 0013 | A peer on an `addPeerStream` address is read as having no `ut_holepunch`, so no holepunch message goes to it and none from it is acted on. Asked for a rendezvous, a libtorrent 2.1 remote tells the peer we could not reach our address, and that peer then leaves our stream to it silent. Asked by one, the engine would tell an ordinary peer to connect to the made-up address. |
