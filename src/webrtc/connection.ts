@@ -323,7 +323,17 @@ class Connection {
   answer: string | null = null
   state: RTCPeerConnectionState = 'new'
   gathering: RTCIceGatheringState = 'new'
-  readonly sctp = { maxMessageSize: MAX_MESSAGE_SIZE }
+  /** Where the stack last sent data: the remote end of the pair ICE chose. Empty until it has. */
+  peerAddress = ''
+  peerPort = 0
+  readonly sctp = {
+    maxMessageSize: MAX_MESSAGE_SIZE,
+    transport: {
+      iceTransport: {
+        getSelectedCandidatePair: () => (this.peerAddress ? { remote: { address: this.peerAddress, port: this.peerPort } } : null),
+      },
+    },
+  }
   #operations: (() => unknown)[] = []
   #running = false
   #scheduled = false
@@ -405,7 +415,16 @@ class Connection {
   #transmit(handle: number) {
     const { x, socket } = this.host
     // copied: the socket may send after this returns, when the stack has reused its buffer
-    socket.send(this.#out(handle).slice(), x.rtc_port(handle), dotted(x.rtc_arg(handle)), ignore)
+    const data = this.#out(handle).slice()
+    const port = x.rtc_port(handle)
+    const address = dotted(x.rtc_arg(handle))
+    // A STUN message starts with 0 to 3 and goes to every candidate. Everything else is DTLS,
+    // which the stack sends to the pair ICE chose and nowhere else.
+    if (data[0] > 3) {
+      this.peerAddress = address
+      this.peerPort = port
+    }
+    socket.send(data, port, address, ignore)
   }
 
   /** Everything the stack has to say after one operation. */

@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createWebRTC, MiB, once, pair, receive, send, wasm } from './rig/local.mjs'
+import { createWebRTC, gathered, MiB, once, pair, receive, send, wasm } from './rig/local.mjs'
 import { socketPair } from './rig/memory-network.mjs'
 import { operations, traced } from './rig/trace.mjs'
 
@@ -238,4 +238,34 @@ test('a closed channel has delivered everything sent before the close, and the c
   const again = b.createDataChannel('again')
   const [{ channel }] = await Promise.all([once(a, 'datachannel'), once(again, 'open')])
   assert.equal(channel.label, 'again')
+})
+
+test("the selected pair's remote is where the data goes: null before, and never a candidate that only got checks", async (t) => {
+  const { a, b, sockets } = await facing(t)
+  const [ours, theirs] = sockets
+  const selected = (pc) => pc.sctp.transport.iceTransport.getSelectedCandidatePair()
+  const channel = a.createDataChannel('test')
+  await a.setLocalDescription()
+  assert.equal(selected(a), null)
+
+  // what the pair reads each time the socket is handed a datagram
+  const read = new Set()
+  const send = ours.send
+  ours.send = (...args) => {
+    send(...args)
+    const pair = selected(a)
+    read.add(pair && `${pair.remote.address}:${pair.remote.port}`)
+  }
+  await b.setRemoteDescription(await gathered(a))
+  await b.setLocalDescription()
+  const answer = await gathered(b)
+  // a second candidate, at an address where nobody is
+  const nobody = 'a=candidate:2 1 udp 2130706175 198.51.100.77 40077 typ host'
+  await a.setRemoteDescription({ type: 'answer', sdp: answer.sdp.replace(/^a=candidate:.*$/m, `$&\r\n${nobody}`) })
+  await once(channel, 'open')
+
+  assert.ok(ours.sent.some(({ address }) => address === '198.51.100.77'), 'the second candidate was sent a check, so it could have been named')
+  assert.deepEqual([...read], [null, `${theirs.address}:${theirs.port}`])
+  assert.deepEqual(selected(a), { remote: { address: theirs.address, port: theirs.port } })
+  assert.deepEqual(selected(b), { remote: { address: ours.address, port: ours.port } })
 })

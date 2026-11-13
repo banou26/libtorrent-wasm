@@ -129,8 +129,17 @@ export interface RTCPeerConnection extends EventTarget {
   /**
    * Null until a description is set. `maxMessageSize` is the remote description's
    * `a=max-message-size` (65536 when it has none), capped at 262144, the most this module sends.
+   * `getSelectedCandidatePair()` answers the address and port the peer is reached at, which is
+   * `remote` of the platform's pair and nothing else of it, and null until ICE has chosen one.
    */
-  readonly sctp: { readonly maxMessageSize: number } | null
+  readonly sctp: {
+    readonly maxMessageSize: number
+    readonly transport: {
+      readonly iceTransport: {
+        getSelectedCandidatePair(): { readonly remote: { readonly address: string | null; readonly port: number | null } } | null
+      }
+    }
+  } | null
   /** Does not fire for `close()`, as the platform. */
   onconnectionstatechange: Handler
   /** `channel` is the one the peer opened, already open. */

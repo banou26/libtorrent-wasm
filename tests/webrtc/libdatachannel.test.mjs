@@ -61,6 +61,14 @@ for (const offer of [true, false]) {
     assert.equal((await said).data, 'from the remote é')
   })
 
+  test(`${role}: the selected pair's remote is the address and port libdatachannel sends from`, async (t) => {
+    const { pc, remote } = await linked(t, { offer })
+    remote.send({ t: 'pair' })
+    const { local } = await remote.next('pair')
+    assert.equal(local.address, '127.0.0.1')
+    assert.deepEqual(pc.sctp.transport.iceTransport.getSelectedCandidatePair(), { remote: { address: '127.0.0.1', port: local.port } })
+  })
+
   test(`${role}: ${TRANSFER / MiB} MiB each way, SHA-256 equal`, { timeout: 300_000 }, async (t) => {
     const link = await linked(t, { offer })
     await bothWays(link, TRANSFER, 16384)

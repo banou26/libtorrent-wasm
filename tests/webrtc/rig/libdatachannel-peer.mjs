@@ -67,6 +67,7 @@ process.on('message', (message) => {
   else if (message.t === 'expect') receiving.expect = message.bytes
   else if (message.t === 'send') transfer(message)
   else if (message.t === 'say') channel.sendMessage(message.text)
+  else if (message.t === 'pair') send({ t: 'pair', ...pc.getSelectedCandidatePair() })
   else if (message.t === 'close-channel') channel.close()
   else if (message.t === 'close-connection') pc.close()
   else if (message.t === 'exit') {

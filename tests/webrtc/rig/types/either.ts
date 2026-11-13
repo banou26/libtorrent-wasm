@@ -18,6 +18,7 @@ export async function offer(PeerConnection: PeerConnection) {
   pc.ondatachannel = ({ channel }) => channel.send('hello')
   pc.onicecandidate = ({ candidate }) => sizes.push(candidate?.candidate?.length ?? 0)
   pc.addEventListener('connectionstatechange', () => sizes.push(pc.connectionState.length))
+  channel.onopen = () => sizes.push(pc.sctp?.transport.iceTransport.getSelectedCandidatePair()?.remote.address?.length ?? 0)
   await pc.setLocalDescription(await pc.createOffer())
   return pc.localDescription?.sdp
 }
