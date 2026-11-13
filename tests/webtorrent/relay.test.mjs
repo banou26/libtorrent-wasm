@@ -5,16 +5,19 @@
 // can tell them apart by address as it does behind a relay.
 
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import dgram from 'node:dgram'
 import fs from 'node:fs'
 import path from 'node:path'
 import test, { after } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 
 import { createWebRTC } from '../../build/webrtc.js'
 import { rtcLinks, webtorrentPeers } from '../../build/webtorrent/index.js'
 import { countingHost } from '../rig/counting-host.mjs'
 import { waitFor } from '../rig/peer-handshake.mjs'
-import { MiB, dialTcp, fixture, savedSha256, startEngine, startSeeder, teardown } from '../rig/stream-engine.mjs'
+import { MiB, dialTcp, fixture, savedSha256, startEngine, startSeeder, teardown, tempDir } from '../rig/stream-engine.mjs'
 import { TRACKER, download, finished, magnetOf, routedWebSocket, seed, swarmOver } from './engine-swarm.mjs'
 import { FakeSession, nativeRtc, referenceTracker, releaseNativeRtc } from './fakes.mjs'
 
@@ -209,4 +212,29 @@ test('libdatachannel: an engine with the WebRTC entry and an engine with libdata
   assert.deepEqual([atTheirs.carriedBy, atOurs.carriedBy], [['webrtc'], ['webrtc']])
   assert.deepEqual(ours.handed.length, 2)
   assert.deepEqual(ours.peers.snapshot().torrents.map((torrent) => torrent.silent), [0, 0])
+})
+
+test('after a relay outage a swarm and a factory made again on a new socket have WebRTC bytes moving within 10 s', async (t) => {
+  if (!await import('bittorrent-tracker').catch(() => null)) return t.skip('bittorrent-tracker is not installed')
+  const out = tempDir(teardown(t))
+  // tests/rig/rel-outage.mjs in a process of its own: a download with a uTP peer and a WebRTC peer, behind a
+  // relay that is taken away for 3 s
+  const outage = async (mode) => {
+    const json = path.join(out, `${mode}.json`)
+    await promisify(execFile)(process.execPath, [
+      fileURLToPath(new URL('../rig/rel-outage.mjs', import.meta.url)),
+      '--mode', mode, '--outage', '3000', '--size', '16', '--at', '0.05', '--watch', '12000', '--json', json,
+    ], { timeout: 50_000 })
+    return JSON.parse(fs.readFileSync(json, 'utf8')).summary
+  }
+  const [rebuilt, left] = await Promise.all([outage('rebuild'), outage('none')])
+
+  assert.equal(rebuilt.factoriesMade, 2)
+  assert.ok(rebuilt.webrtcAgainAfterRestoreMs !== null && rebuilt.webrtcAgainAfterRestoreMs <= 10_000, `WebRTC bytes again after ${rebuilt.webrtcAgainAfterRestoreMs} ms`)
+  assert.equal(rebuilt.sameChannel, false)
+  t.diagnostic(`WebRTC bytes again ${rebuilt.webrtcAgainAfterRestoreMs} ms after the relay came back, uTP bytes ${rebuilt.utpAgainAfterRestoreMs} ms`)
+
+  // left alone, the factory has ended with its socket, and the download goes on over uTP alone
+  assert.equal(left.webrtcAgainAfterRestoreMs, null)
+  assert.ok(left.utpAgainAfterRestoreMs !== null && left.done < left.size, `the control ended at ${left.done} of ${left.size} bytes`)
 })
