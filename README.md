@@ -618,7 +618,7 @@ three runs each (lowest to highest), with other work on the machine (load 2 to
 | file | raw | gzip -9 | brotli -q 11 |
 | --- | --- | --- | --- |
 | `build/webrtc.wasm` | 3,124,349 | 1,038,975 | 752,403 |
-| `build/webrtc.js` | 29,318 | 9,246 | 8,145 |
+| `build/webrtc.js` | 29,739 | 9,407 | 8,267 |
 
 **Release profile**, MiB/s with libdatachannel at the default send buffer. These
 four were built before the build remapped source paths, which took 19,312 bytes
