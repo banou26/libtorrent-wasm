@@ -135,8 +135,8 @@ test('arrivals in tasks of their own start the count again once in a millisecond
   // a datagram of no connection is dropped, and it is an arrival all the same
   const stray = [new Uint8Array(20), { address: '198.51.100.99', port: 5555 }]
   for (const [at, expected] of [[0, 128], [0.25, 128], [0.5, 128], [0.75, 128], [1, 256], [1.75, 256], [2, 384]]) {
-    // two turns of the event loop: the factory has seen a task begin since it last handed anything over
-    for (let turn = 0; turn < 2; turn++) await new Promise((resolve) => setImmediate(resolve))
+    // a task of its own for each: the microtasks have run since the factory last handed anything over
+    await new Promise((resolve) => setImmediate(resolve))
     now = start + at
     deliver('message', ...stray)
     assert.equal(handed.length - first, expected, `after an arrival ${at} ms into the count`)
