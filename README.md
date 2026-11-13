@@ -144,7 +144,9 @@ is what moves the cursor onto the watched file.
 Pieces straddling a file boundary keep the claimed priority, so no byte the
 watched file needs is ever skipped. Skipping files shrinks `totalWanted`, so
 `progress` and the finished state then describe the selection rather than the
-whole torrent, and the selection is persisted into resume data.
+whole torrent, and the selection is persisted into resume data. `totalDone`
+still counts a skipped file that is held, so what is left of the selection is
+`totalWanted - totalWantedDone`.
 
 ## Peer streams
 

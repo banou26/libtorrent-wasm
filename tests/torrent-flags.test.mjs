@@ -200,7 +200,7 @@ test('the transfer accounting decodes as numbers rather than as shifted bytes', 
   const st = rig.session.status(handle)
 
   for (const key of [
-    'allTimeDownload', 'allTimeUpload', 'sessionDownload', 'sessionUpload',
+    'totalWantedDone', 'allTimeDownload', 'allTimeUpload', 'sessionDownload', 'sessionUpload',
     'sessionPayloadDownload', 'sessionPayloadUpload', 'wasted',
     'numConnections', 'availability',
     'activeSeconds', 'seedingSeconds', 'addedAt', 'completedAt', 'lastSeenComplete',

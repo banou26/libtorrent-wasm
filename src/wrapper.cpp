@@ -224,6 +224,7 @@ void emit_state_update(lt::state_update_alert const* sua) {
     i32(static_cast<std::int32_t>(st.state));
     i64(st.total_done);
     i64(st.total_wanted);
+    i64(st.total_wanted_done);
     f32(st.progress);
     i32(st.download_payload_rate);
     i32(st.upload_payload_rate);

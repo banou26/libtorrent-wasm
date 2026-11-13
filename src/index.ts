@@ -91,6 +91,11 @@ export interface TorrentStatus {
   progress: number
   totalDone: number
   totalWanted: number
+  /**
+   * Bytes held of what is wanted. `totalDone` also counts a file that is held and skipped, so what
+   * is still to come is `totalWanted - totalWantedDone`, never `totalWanted - totalDone`.
+   */
+  totalWantedDone: number
   downloadRate: number
   uploadRate: number
   numPeers: number
@@ -1613,6 +1618,7 @@ export class Session {
     const state = view.getInt32(off, true); off += 4
     const totalDone = Number(view.getBigInt64(off, true)); off += 8
     const totalWanted = Number(view.getBigInt64(off, true)); off += 8
+    const totalWantedDone = Number(view.getBigInt64(off, true)); off += 8
     const progress = view.getFloat32(off, true); off += 4
     const downloadRate = view.getInt32(off, true); off += 4
     const uploadRate = view.getInt32(off, true); off += 4
@@ -1666,7 +1672,7 @@ export class Session {
     let numPiecesHave = 0
     for (let i = 0; i < bitfieldBytes; i++) { let b = pieces[i]!; while (b) { numPiecesHave += b & 1; b >>= 1 } }
     this.statusByHandle.set(handle, {
-      state, progress, totalDone, totalWanted, downloadRate, uploadRate,
+      state, progress, totalDone, totalWanted, totalWantedDone, downloadRate, uploadRate,
       numPeers, numSeeds, numPiecesTotal, numPiecesHave, paused,
       autoManaged, sequential, flags, queuePosition, errorCode, error,
       allTimeDownload, allTimeUpload, sessionDownload, sessionUpload,
