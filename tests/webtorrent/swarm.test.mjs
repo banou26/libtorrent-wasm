@@ -358,12 +358,14 @@ test('a session holds 80 connections open or pending, unanswered offers included
   assert.equal(r.live(), 80)
 })
 
-test('40 connections are made in a minute, and the allowance refills with time', async t => {
+test('40 connections are made in a minute, and the allowance refills with time, never past 40', async t => {
   const r = rig(t, { limits: { torrentPeers: 1000, sessionPeers: 1000, connections: 1000 } })
   await r.start(1, { watched: true })
   assert.equal(await answeredOf(r, 1, 50), 40)
   await advance(t, 30 * SECOND, SECOND)
   assert.equal(await answeredOf(r, 1, 50), 20)
+  await advance(t, 600 * SECOND, SECOND)
+  assert.equal(await answeredOf(r, 1, 50), 40, 'ten quiet minutes save nothing up')
 })
 
 test('the watched torrent is served first: the others leave it ten of every session budget, seeding ones twenty', async t => {
@@ -847,6 +849,11 @@ test('a message that does not validate is counted in the snapshot, and the swarm
   assert.equal(r.peers.snapshot().dropped, 2)
   assert.equal(r.rtc.stats.made, 0)
   assert.equal(await new Remote(r).connect(1), true)
+
+  r.session.remove(1)
+  await settle()
+  assert.equal(r.tracker.sockets.size, 0)
+  assert.equal(r.peers.snapshot().dropped, 2, 'the count outlives the tracker socket it was made on')
 })
 
 test('close says stopped everywhere, closes every connection and socket, and nothing runs afterwards', async t => {
