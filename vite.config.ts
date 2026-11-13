@@ -33,6 +33,7 @@ export default defineConfig({
         types: 'src/types.ts',
         'webtorrent/index': 'src/webtorrent/index.ts',
         'webtorrent/page': 'src/webtorrent/page.ts',
+        webrtc: 'src/webrtc/index.ts',
       },
       formats: ['es'],
     },

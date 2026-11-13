@@ -32,6 +32,13 @@
     "./webtorrent/page": {
       "types": "./build/webtorrent/page.d.ts",
       "import": "./build/webtorrent/page.js"
+    },
+    "./webrtc": {
+      "types": "./build/webrtc/index.d.ts",
+      "import": "./build/webrtc.js"
+    },
+    "./webrtc.wasm": {
+      "default": "./build/webrtc.wasm"
     }
   },
   "scripts": {
@@ -41,7 +48,8 @@
     "docker-clean": "docker compose up --remove-orphans",
     "vite-build": "vp build",
     "vite-build-dev": "vp build --watch",
-    "build": "npm run make-docker && npm run vite-build && npm run types && npm run copy-wasm",
+    "build": "npm run make-docker && npm run copy-wasm && npm run build:webrtc",
+    "build:webrtc": "npm run webrtc-wasm && npm run vite-build && npm run types",
     "webrtc-wasm": "node webrtc/patch-sctp-proto.mjs && cd webrtc && cargo build --release --locked --target wasm32-wasip1 && cd .. && copyfiles -f webrtc/target/wasm32-wasip1/release/webrtc.wasm build",
     "prepublishOnly": "npm run build",
     "types": "tsc",
