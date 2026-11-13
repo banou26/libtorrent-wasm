@@ -1,0 +1,41 @@
+Subject: [PATCH] perf: skip the in-flight expiry walk when no message has a lifetime
+
+---
+diff --git a/src/queue/outbound_queue.rs b/src/queue/outbound_queue.rs
+index 0f32c21..f65cf79 100644
+--- a/src/queue/outbound_queue.rs
++++ b/src/queue/outbound_queue.rs
+@@ -18,6 +18,8 @@ pub(crate) struct OutboundQueue {
+     inflight: PayloadQueue,
+     next_message_id: u64,
+     next_unstarted_message_id: u64,
++    /// Not upstream. Set once a message with a lifetime is queued: see `expired_inflight`.
++    timed_seen: bool,
+ }
+ 
+ impl OutboundQueue {
+@@ -29,6 +31,11 @@ impl OutboundQueue {
+         if chunks.is_empty() {
+             return;
+         }
++        if chunks.iter().any(|c| {
++            c.deadline.is_some() || matches!(c.reliability, Some((crate::ReliabilityType::Timed, _)))
++        }) {
++            self.timed_seen = true;
++        }
+         let message_id = self.next_message_id;
+         // Never alias a still-queued message, even on counter exhaustion.
+         self.next_message_id = message_id.checked_add(1).expect("message ID exhausted");
+@@ -170,6 +177,12 @@ impl OutboundQueue {
+     /// messages are excluded. Collect before abandonment mutates the queues so
+     /// expiry is independent of send limits.
+     pub(crate) fn expired_inflight(&self, now: Instant) -> Vec<u32> {
++        // Not upstream. This walks every chunk in flight on every poll, which was half of all
++        // samples of a reliable upload with a 4 MiB send buffer. Nothing can have expired when
++        // no message ever had a lifetime, and reliable channels never give one.
++        if !self.timed_seen {
++            return Vec::new();
++        }
+         self.inflight
+             .sorted
+             .iter()
