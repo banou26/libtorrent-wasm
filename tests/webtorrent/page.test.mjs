@@ -297,6 +297,30 @@ test('stopping the page half closes every link it made', async t => {
   assert.equal(Class.all.filter(pc => !pc.closed).length, 0)
 })
 
+test('an attempt still waiting to be read is ended by a close from the worker, and by stopping the page half', async t => {
+  // No timer runs, so the worker never says flush, and these connections never report gathering complete.
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const Class = fakeRtc({ gathering: {} })
+  const waiting = () => Class.all.filter(pc => pc.localDescription && !pc.closed).length
+
+  const { port1, port2 } = new MessageChannel()
+  t.after(() => {
+    port1.close()
+    port2.close()
+  })
+  servePeerLinks(port1, { RTCPeerConnection: Class })
+  port2.postMessage({ t: 'offer', id: 0 })
+  await until('the page waits', () => waiting() === 1)
+  port2.postMessage({ t: 'close', id: 0 })
+  await until('the close ended it', () => waiting() === 0)
+
+  const one = half(t, Class)
+  one.links.offer().catch(() => {})
+  await until('the page waits again', () => waiting() === 1)
+  one.stop()
+  await until('the stop ended it', () => waiting() === 0)
+})
+
 test('the page says when gathering completes, so the worker waits for no timer', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const { links } = half(t, fakeRtc())
