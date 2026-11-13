@@ -172,7 +172,8 @@ What it promises:
 - The address stays inside the engine. A connect or a datagram to the range
   never reaches `net` or `dgram` (a dial with no stream behind it is refused in
   memory), resume data is written and loaded without it, peer exchange does
-  not send it (patch 0011), and no holepunch message names it (patch 0013).
+  not send it (patch 0011), and a holepunch message carries it only back to a
+  peer that named it (patch 0013).
 - No address is given twice before all 4,194,304 have been used.
 - The peer list shows the peer with `transport: 'webrtc'` and an `endpoint`
   that is not an address, and `reachable().inbound` never counts it.
