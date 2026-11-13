@@ -180,6 +180,9 @@ bool emit_torrent_ready(std::uint32_t storage_index) {
   if (!si.fs || !si.fs->is_valid()) return true;
   std::uint32_t const hid = handle_id_for_hash(si.info_hash);
   if (hid == 0) return false;
+  // a removed torrent's storage outlives it a while, and its hash may name a torrent added again
+  auto const t = g_session->handles[hid].native_handle();
+  if (!t->has_storage() || t->storage() != lt::storage_index_t{storage_index}) return true;
   auto const* fs = si.fs;
   int const nf = fs->num_files();
   g_session->geometry[hid] = torrent_geometry{fs->num_pieces(), nf};

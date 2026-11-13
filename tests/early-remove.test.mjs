@@ -142,6 +142,22 @@ test('an add after an early remove stands, where it was asked to: add, remove, a
   assert.equal(removed(), 1)
 })
 
+test('a magnet added again elsewhere after an early remove is not given the removed torrent\'s files', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const { session, removed } = await engineHolding(defer, fx)
+
+  const file = session.addTorrentFile(fx.meta.torrent, '/dl')
+  session.removeTorrent(file)
+  const again = session.addMagnet(magnetFor(fx.meta.infoHash, fx.meta.name), '/moved')
+  assert.equal(again, file)
+  session.tick()
+  session.popAlerts()
+  assert.equal(session.files(again), null)
+  await waitFor('the removal', () => removed() === 1)
+  assert.equal(session.files(again), null)
+})
+
 test('removeTorrent() says false for a handle the engine never gave out', async (t) => {
   const defer = teardown(t)
   const fx = fixture(defer, MiB)
