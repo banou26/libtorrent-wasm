@@ -46,10 +46,11 @@ export interface WebRTCOptions {
    * trip: 5 MiB/s at 50 ms with the default.
    *
    * Defaults to 262144, which is also the least it can be (the largest message). More is faster
-   * toward a peer that keeps up (12 MiB/s toward libdatachannel at an emulated 50 ms round trip
-   * from 1 MiB up) and goes out in larger bursts, which a busy browser drops: toward Chrome the
-   * rate at every size from 512 KiB up fell to between 1 and 2 MiB/s in some runs. The README has
-   * the table.
+   * toward libtorrent 2.1 and libdatachannel: over a 50 ms round trip 8 MiB/s at 512 KiB and 12
+   * to 19 from 1 MiB, the most for a writer that lets `bufferedAmount` fall no lower than this
+   * size before it writes again. Toward Chrome more is not faster: 512 KiB fell to 1.6 MiB/s on
+   * a busy machine, and every size above it was erratic on a quiet one. The README has the
+   * tables.
    */
   sendBufferSize?: number
 }

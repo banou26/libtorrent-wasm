@@ -513,7 +513,10 @@ Events arrive through `addEventListener` and through the `on` handlers alike.
   `remoteDescription`, `iceGatheringState` with `icegatheringstatechange` and
   `icecandidate` (the host candidate, then `null`; the description carries the
   candidate from the start), `connectionState` with `connectionstatechange`,
-  `ondatachannel`, `sctp.maxMessageSize`, `close()`.
+  `ondatachannel`, `sctp.maxMessageSize`, `close()`, and
+  `sctp.transport.iceTransport.getSelectedCandidatePair()`, which answers
+  `{ remote: { address, port } }`, where the peer is reached, and nothing else of
+  the platform's pair; it is `null` until ICE has chosen.
 - **`RTCDataChannel`**: `label`, `readyState`, `binaryType`, `send` (a string, an
   `ArrayBuffer` or a view), `bufferedAmount`, `bufferedAmountLowThreshold` with
   `bufferedamountlow`, `close()`, and `open`, `message`, `error`, `close`.
@@ -527,6 +530,12 @@ Events arrive through `addEventListener` and through the `on` handlers alike.
   address goes to the connection whose ICE user name it carries; one that belongs
   to none is dropped and counted in `droppedDatagrams`. The socket's `error` or
   `close` ends every connection.
+- **The socket is handed at most 128 datagrams in a millisecond**, over all its
+  connections; what is ready beyond that waits and follows in order, 128 a
+  millisecond. A window that opens all at once is about a thousand datagrams,
+  and libtorrent 2.1 ends a connection when it reads 1000 without its socket
+  running empty: 4 of 15 uploads of 256 MiB over a 50 ms round trip ended that
+  way, none of 30 with the bound (see the measurements).
 - **`connectionState` is `failed` at once** when the peer closes its connection
   or the socket goes, and 21.5 s after the peer goes quiet (measured). `closed`
   comes from `close()`, with no event, as on the platform.
@@ -610,15 +619,17 @@ tests 64 MiB each way instead of 16.
 2026-11-13, Ryzen 7 9800X3D, node 26.12.1, Chrome 156.0.8078.47, libdatachannel
 0.24.2, everything on loopback, 16 KiB messages, SHA-256 equal in every run,
 three runs each (lowest to highest), with other work on the machine (load 2 to
-5). `tests/webrtc/rig/bench.mjs` produces every row. "50 ms" holds each datagram
-25 ms in each direction in a JavaScript timer: an indication, not a network.
+5). `tests/webrtc/rig/bench.mjs` produces every row but those against
+libtorrent 2.1, whose rig is described with them. In a `bench.mjs` row "50 ms"
+holds each datagram 25 ms in each direction in a JavaScript timer: an
+indication, not a network.
 
 **Shipped sizes**
 
 | file | raw | gzip -9 | brotli -q 11 |
 | --- | --- | --- | --- |
 | `build/webrtc.wasm` | 3,124,349 | 1,038,975 | 752,403 |
-| `build/webrtc.js` | 29,739 | 9,407 | 8,267 |
+| `build/webrtc.js` | 31,987 | 10,210 | 8,977 |
 
 **Release profile**, MiB/s with libdatachannel at the default send buffer. These
 four were built before the build remapped source paths, which took 19,312 bytes
@@ -645,24 +656,91 @@ put binaryen in every build. So `opt-level = 3`.
 | Chrome 156 | 44.0 to 52.8 | 56.6 to 71.4 |
 | itself, both ends on one thread of a dedicated worker in Chrome | 28 to 32 |  |
 
-**The send buffer** (`sendBufferSize`), MiB/s from us to the remote
+**Bursts**: what the bound of 128 datagrams a millisecond is for, and what it
+costs
 
-| send buffer | libdatachannel | libdatachannel, 50 ms | Chrome | Chrome, 50 ms |
+Toward a libtorrent 2.1 peer the window is that peer's receive window, 1 MiB,
+about 1000 datagrams, and a write into an idle connection sends all of it at
+once. The libjuice inside libtorrent 2.1 (libdatachannel 0.24.1) reads at most
+1000 datagrams each time it wakes and takes reaching that number for a failed
+socket: it fails ICE, and the peer is dropped with no warning in its log.
+libdatachannel 0.24.3 has that fixed; no libtorrent release carries it yet.
+
+Measured against the libtorrent 2.1.1 wheel in private network namespaces, with
+netem for the round trip, this entry over node's dgram as our end and the
+torrent engine writing into the channel (it waits above 1 MiB queued and goes on
+at 256 KiB). Each run is one upload of 256 MiB with the send buffer at 4 MiB,
+runs with and without the bound alternated, two at a time:
+
+| round trip | bound | runs | ended early | MiB/s, median (lowest to highest) | most datagrams in one task | within 1 ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| 50 ms | with | 30 | 0 | 11.87 (7.72 to 12.01) | 128 | 256 |
+| 50 ms | without | 15 | 4 | 11.87 (8.16 to 11.96) | 1009 | 968 |
+| 100 ms | with | 10 | 0 | 7.29 (5.32 to 7.38) | 128 | 256 |
+| 100 ms | without | 5 | 0 | 4.86 (4.74 to 7.39) | 1024 | 880 |
+| none | with | 13 | 0 | 34.02 (23.79 to 34.82) | 128 | 256 |
+| none | without | 5 | 0 | 33.52 (24.30 to 34.62) | 1026 | 734 |
+
+A task is one callback of node's event loop with its microtasks. A capture on the
+wire, before the delay and after it, reads the same as the counts our end keeps:
+with the bound never more than 256 datagrams within a millisecond or back to
+back (two milliseconds' worth can meet), without it 817 within a millisecond and
+1009 back to back, and five or six runs of 1000 or more in one upload.
+
+Each of the four early ends has libjuice's failure in the 2.1 peer's own log,
+and nothing before it. The first 20 and 10 runs at 50 ms were made one change
+before the last (the timer that takes up what waits had two places where it was
+armed), the other 10 and 5 on the code as it is. Downloads of 256 MiB at 50 ms
+are the same either way, 10 runs each: 1.39 MiB/s (0.87 to 2.21) with the bound
+and 1.06 (0.92 to 1.96) without, the rate libtorrent 2.1 falls to as a sender
+behind a round trip, with two runs of each still connected and unfinished after
+300 s; our end sends at most 39 datagrams in a millisecond there.
+
+**The send buffer** (`sendBufferSize`), MiB/s from us to the remote, measured
+again with the bound: three runs each at load 2 to 7, and for the last column
+with eight busy loops beside the run (load 5 to 18)
+
+| send buffer | libdatachannel | libdatachannel, 50 ms | Chrome | Chrome, 50 ms | Chrome, 50 ms, busy machine |
+| --- | --- | --- | --- | --- | --- |
+| 256 KiB (default) | 49.3 to 54.5 | 4.5 | 48.1 to 53.3 | 3.2, 4.5, 4.5 | 4.5, 2.5, 3.9 |
+| 512 KiB | 39.3 to 44.6 | 8.1 | 38.3 to 39.6 | 8.0, 8.1, 8.1 | 1.6, 1.6, 1.6 |
+| 1 MiB | 32.2 to 33.3 | 12.3 to 12.4 | 32.2 to 34.5 | 2.1, 3.3, 8.6 | 2.6, 2.1, 1.1 |
+| 2 MiB | 28.7 to 33.2 | 12.3 to 12.5 | 19.9 to 22.3 | 2.0, 2.5, 3.0 |  |
+| 4 MiB | 32.0 to 32.8 | 12.3 to 12.5 | 12.8 to 13.2 | 1.5, 2.2, 4.3 |  |
+
+The same runs without the bound gave the same picture in every column. Toward
+libtorrent 2.1 in the rig above, where the delay is a real one, 256 MiB each
+run, with the bound, median (lowest to highest):
+
+| send buffer | 50 ms | 50 ms, writer that goes on at the buffer's size | 100 ms | no delay |
 | --- | --- | --- | --- | --- |
-| 256 KiB (default) | 43.2 to 54.2 | 4.5 to 4.6 | 44.0 to 52.8 | 4.5, 1.8, 4.5 |
-| 512 KiB | 43.4 to 45.1 | 8.1 to 8.2 | 34.5 to 44.3 | 8.1, 8.0, 8.0 |
-| 1 MiB | 31.2 to 32.8 | 11.9 to 12.5 | 31.7 to 33.8 | 5.6, 2.3, 8.4 |
-| 2 MiB | 32.7 to 33.3 | 12.4 to 12.5 | 20.7 to 22.1 | 4.1, 3.7, 3.8 |
-| 4 MiB | 30.6 to 32.6 | 12.5 | 11.3 to 12.7 | 1.3, 5.4, 2.5 |
+| 256 KiB (default) | 4.56 (4.54 to 4.57) | the same writer | 2.35 (2.33, 2.38) | 46.40 (46.25 to 48.18) |
+| 512 KiB | 8.04 (7.14 to 8.05) | 7.95 (7.78 to 8.14) |  |  |
+| 1 MiB | 11.84 (11.81 to 11.99) | 15.44 (14.07 to 16.95) | 7.36 (7.36, 7.36) | 34.23 (33.18 to 34.63) |
+| 2 MiB | 11.83 (11.78 to 11.91) | 18.88 (17.05 to 18.90) |  |  |
+| 4 MiB | 11.87 (7.72 to 12.01), 30 runs | 19.07 (16.07 to 19.14) | 7.29 (5.32 to 7.38), 10 runs | 34.02 (23.79 to 34.82), 13 runs |
 
 The buffer is the window: at most that much is in flight, so the rate is at most
-the buffer per round trip (5 MiB/s at 50 ms for 256 KiB, 4.5 measured). A larger
-one is faster while the peer keeps up, and goes out in larger bursts. Toward
-Chrome that stopped paying at 1 MiB, and two earlier runs on a busier machine
-(load 7 to 14) had 512 KiB at 0.8 and 1.5 MiB/s toward Chrome at 50 ms where
-256 KiB held 4.5 both times. The default is the size whose rate depended least
-on the peer; it is also the least the option takes, the largest message. A
-caller that knows its path can raise it.
+the buffer per round trip (5 MiB/s at 50 ms for 256 KiB, 4.56 measured), up to
+what the peer's own window takes. Toward libtorrent 2.1 and libdatachannel every
+step up is faster behind a round trip, and with the bound a large buffer no
+longer sends a thousand datagrams at once. Toward Chrome it is not faster:
+512 KiB held 8 MiB/s on a quiet machine and fell to 1.6 on a busy one, three
+runs of three (0.8 and 1.5 in two runs before the bound), and every size above
+it was erratic on a quiet one. The bound changes none of that, and at 1 MiB and
+4 MiB a bound of 64 or 32 datagrams a millisecond was as erratic. Without delay
+the smallest buffer is the fastest. So the default stays 256 KiB, the size whose
+rate depended least on the peer and on the machine; it is also the least the
+option takes, the largest message. A caller whose peers are libtorrent can
+raise it.
+
+**How much the writer keeps queued** matters from 1 MiB up. When the writer lets
+`bufferedAmount` fall below the send buffer before it writes again, the stack's
+buffer runs empty and the window is part empty for a round trip: at 1 MiB a
+writer that went on at 256 KiB had 11.84 MiB/s at 50 ms and one that went on at
+1 MiB had 15.44; at 4 MiB it is 11.87 against 19.07. So
+`bufferedAmountLowThreshold` is the send buffer's size or more. At the default
+there is nothing to gain: 4.56 MiB/s is the window.
 
 **The two sctp-proto patches**, MiB/s with libdatachannel
 
@@ -677,6 +755,32 @@ caller that knows its path can raise it.
 messages, which reliable channels never have. `0002`: libdatachannel acknowledges
 after 20 ms itself, and a libdatachannel sender behind a round trip is several
 times slower toward a receiver that waits 200.
+
+**A third patch that was measured and not taken: Max.Burst.** RFC 9260 (6.1 D)
+has a sender stop after Max.Burst packets (4) at each occasion to send, and
+sctp-proto has no such limit. Three forms of it were built and run beside the
+bound in the wrapper, in the rig above at 50 ms, three runs each, three at a
+time:
+
+| what bounds a burst | MiB/s, median (lowest to highest) | most datagrams in one task | within 1 ms |
+| --- | --- | --- | --- |
+| nothing | 8.68 (7.34 to 11.97) | 1009 | 960 |
+| the wrapper, 128 a millisecond (shipped) | 11.80 (11.57 to 11.98) | 128 | 256 |
+| the wrapper, 64 a millisecond | 11.75 (11.67 to 11.82) | 64 | 128 |
+| Max.Burst opened by a packet from the peer, a write, a T3-rtx expiry and every timer call | 8.23 (8.18 to 8.25) | 269 | 305 |
+| the same without the timer call | 8.25 (8.11 to 8.25) | 269 | 304 |
+| Max.Burst opened by a packet from the peer and a T3-rtx expiry alone | 2.48 (2.47 to 2.49) | 5 | 84 |
+| the second form with the wrapper's bound | 8.26 (8.23 to 8.36) | 128 | 256 |
+| the third form with the wrapper's bound | 2.45 (2.45 to 2.48) | 5 | 84 |
+
+A burst that a write opens is four datagrams for each write of a task, so it
+grows with what the caller writes: 269 here, 541 with a writer that waits above
+2 MiB. One that only the peer opens is a slow start after every pause of the
+writer, and this writer pauses several times a second. Opening one on every
+timer call changed neither the rate nor the counts. The bound in the wrapper
+holds whatever is written, whichever timer fires, and costs no rate, so no third
+patch is carried. 64 a millisecond was as fast here; 128 leaves more room above
+the 50 datagrams a millisecond the stack makes at its fastest on this machine.
 
 ### Traps
 
@@ -725,6 +829,19 @@ Each of these was found by getting it wrong.
   and cargo builds a crate again only when one of its files is newer than its
   last build. Unpacked that way, taking the last patch out left the patched wasm
   in place with exit 0. The script unpacks with `-m`.
+- **node's dgram sends nothing until the task ends.** An unconnected `send` to an
+  address goes through `dns.lookup`, which answers on `process.nextTick`, so
+  everything one task hands the socket reaches the kernel together: 1009
+  datagrams back to back, 968 of them within one millisecond, measured.
+- **The stack sends a whole window at once.** sctp-proto 0.10.8 has no Max.Burst
+  (RFC 9260, 6.1 D): a write into an idle connection sends all the window
+  allows, and each T3-rtx expiry sends everything outstanding again. The bound
+  on the socket is what spreads both.
+- **A bound per millisecond is counted from where a task begins**, a datagram's
+  arrival or a timer. The clock moves inside a task too, and counting from there
+  lets one long task hand over a millisecond's worth many times before any of it
+  leaves. And it is not counted from a timer alone: a page whose timers are held
+  back would send 128 datagrams a second.
 - **A test that proves a limit is a counted loop.** "Send until it throws" never
   ends once the limit is gone, and a loop that never yields is one no test
   timeout stops (`fill()` in `tests/webrtc/rig/local.mjs`).
