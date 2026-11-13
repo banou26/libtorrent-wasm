@@ -342,6 +342,11 @@ addToLibrary({
      */
     REDIAL_AFTER_MS: 3000,
 
+    // how long a healed udp socket has to stay up before the peers it cut are dialled again
+    // (wrapper.cpp, lt_session_redial_cut_peers)
+    REDIAL_WAIT_MS: 2000,
+    redialTimer: null,
+
     // `adopt` is a socket the host bound before the session existed, already listening on the port
     // wrapper.cpp was told to announce. Adopting it rather than binding a fresh one is what keeps
     // the announced port true: a socket bound after the fact could not get that number back, since
@@ -390,9 +395,11 @@ addToLibrary({
         const a = sock.address()
         st.localAddr = a.address; st.localPort = a.port; st.localFamily = a.family
         if (st.homePort == null) st.homePort = a.port
-        // healed: every uTP peer rode the socket this one replaces (wrapper.cpp, lt_session_redial_utp_peers)
-        if (st.outageAt != null && Date.now() - st.outageAt > FKN.REDIAL_AFTER_MS && Module._lt_session_redial_utp_peers) {
-          Module._lt_session_redial_utp_peers()
+        if (st.outageAt != null) {
+          // healed: the uTP peers rode the socket this one replaces
+          if (Date.now() - st.outageAt > FKN.REDIAL_AFTER_MS) Module._lt_session_cut_utp_peers?.()
+          clearTimeout(FKN.redialTimer)
+          FKN.redialTimer = setTimeout(() => { Module._lt_session_redial_cut_peers?.(); FKN.scheduleTick() }, FKN.REDIAL_WAIT_MS)
           FKN.scheduleTick()
         }
         st.outageAt = null
@@ -422,6 +429,8 @@ addToLibrary({
       st.dead = true
       st.reopening = true
       if (st.outageAt == null) st.outageAt = Date.now()
+      // the peers a heal cut wait for the next one that lasts
+      clearTimeout(FKN.redialTimer)
       FKN.stats.udpReopen = (FKN.stats.udpReopen || 0) + 1
       st.reopenAttempts = (st.reopenAttempts || 0) + 1
       const delay = FKN.reopenDelay(FKN.UDP_REOPEN_DELAYS, st.reopenAttempts, 'udp socket', why)

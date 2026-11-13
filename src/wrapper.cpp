@@ -52,7 +52,6 @@ extern "C" int __syscall_setsockopt(int /*fd*/, int /*level*/, int /*optname*/,
 #include "libtorrent/bencode.hpp"
 #include "libtorrent/string_util.hpp"
 #include <boost/asio/post.hpp>
-#include <boost/asio/steady_timer.hpp>
 
 #include "disk_io.hpp"
 
@@ -95,6 +94,10 @@ struct session_state {
   // one can dial in from a carrier's network that uses it.
   std::unordered_set<std::uint32_t> stream_peers;
   std::uint32_t next_handle_id = 1;
+
+  // the peers lt_session_cut_utp_peers disconnected, until lt_session_redial_cut_peers
+  struct cut_peer { std::weak_ptr<lt::torrent> t; lt::address a; lt::torrent_peer* peer; };
+  std::vector<cut_peer> cut;
 };
 
 constexpr char const* RESUME_WS_TRACKERS = "ws-trackers";
@@ -1447,22 +1450,17 @@ LT_API int lt_torrent_forget_pieces(std::uint32_t id, std::int32_t const* pieces
   return n;
 }
 
-// Reset every uTP peer we can dial back, and dial again the ones that have not dialled us back 2 s
-// later. The shim calls this when it has replaced the udp socket those peers rode on
-// (library_fkn.js, attachUdp).
+// Reset and disconnect every uTP peer we can dial back, kept for lt_session_redial_cut_peers. The
+// shim calls this when it has replaced the udp socket those peers rode on (library_fkn.js, attachUdp).
 //
 // Nothing tells libtorrent the old socket is gone. Measured against transmission seeders through a
 // relay away for 20 s: each connection sat until uTP gave up on its resends (utp_num_resends 8, 196
 // to 200 s after the drop) or until peer_timeout (240 s), and min_reconnect_time then held the
-// redial back 60 s. Clearing last_connected is what lifts that wait; fast_reconnect() would too, but
-// only twice in a peer's life.
+// redial back 60 s.
 //
 // The reset is what lets a new connection in: a remote keeps its side of the old one until its own
 // resends give up and turns a second connection from us away meanwhile (without the reset the
-// bytes came back 11.0 s after the relay instead of 4.0 to 4.5 s). A transmission seed that gets it
-// dials us back at once, and a redial of ours in the same second crossed it in 1 of 5 runs: each
-// side kept a different one of the two connections, both were closed, and the bytes came back
-// 44.0 s after the relay. So the redial waits for the dial-back.
+// bytes came back 11.0 s after the relay instead of 4.0 to 4.5 s).
 //
 // A peer that dialled in over uTP is left alone: its source port is its listen port, so libtorrent
 // never marks it connectable (peer_list.cpp update_peer_port) and nothing would dial it back, while
@@ -1470,40 +1468,52 @@ LT_API int lt_torrent_forget_pieces(std::uint32_t id, std::int32_t const* pieces
 // behind the relay and a libtorrent leech that had dialled in: bytes again 2.3 to 4.3 s after the
 // relay left alone (5 runs), 62 to 63 s when it was cut and the leech waited out its own
 // min_reconnect_time.
-LT_API int lt_session_redial_utp_peers() {
+LT_API int lt_session_cut_utp_peers() {
   if (!g_session) return -1;
   boost::asio::post(*g_session->ioc, [] {
     if (!g_session) return;
-    struct gone { std::weak_ptr<lt::torrent> t; lt::address a; lt::torrent_peer* peer; };
-    auto redial = std::make_shared<std::vector<gone>>();
     for (auto& [id, h] : g_session->handles) {
       auto t = h.native_handle();
       if (!t) continue;
       // copied, because a disconnect leaves the torrent's connection list
-      std::vector<std::shared_ptr<lt::peer_connection>> utp;
+      std::vector<std::shared_ptr<lt::peer_connection>> cut;
       for (auto* p : *t) {
         auto* peer = p->peer_info_struct();
-        if (lt::aux::is_utp(p->get_socket()) && peer && peer->connectable) utp.push_back(p->self());
+        if (lt::aux::is_utp(p->get_socket()) && peer && peer->connectable) cut.push_back(p->self());
       }
-      for (auto const& p : utp) {
+      for (auto const& p : cut) {
         if (auto* s = boost::get<lt::aux::utp_stream>(&p->get_socket()); s && s->get_impl())
           s->get_impl()->send_reset(s->get_impl()->ack_nr());
-        redial->push_back({t, p->remote().address(), p->peer_info_struct()});
+        g_session->cut.push_back({t, p->remote().address(), p->peer_info_struct()});
         p->disconnect(boost::asio::error::network_reset, lt::operation_t::sock_read);
       }
     }
-    if (redial->empty()) return;
-    auto timer = std::make_shared<boost::asio::steady_timer>(*g_session->ioc, std::chrono::seconds(2));
-    timer->async_wait([timer, redial](boost::system::error_code const& ec) {
-      if (ec) return;
-      for (auto const& g : *redial) {
-        auto t = g.t.lock();
-        if (!t) continue;
-        // the pointer is only followed once the peer list still holds it
-        auto const [first, last] = t->find_peers(g.a);
-        if (std::find(first, last, g.peer) != last && !g.peer->connection) g.peer->last_connected = 0;
-      }
-    });
+  });
+  return 0;
+}
+
+// Make every peer lt_session_cut_utp_peers cut since the last call, and not connected again, a
+// connect candidate now.
+// Clearing last_connected is what lifts min_reconnect_time; fast_reconnect() would too, but only
+// twice in a peer's life.
+//
+// The shim calls this once the socket has stayed up 2 s, never while it is down, where a dial would
+// fail and raise the peer's failcount. The 2 s are for a remote that dials us back on the reset, as a
+// transmission seed does: a redial in the same second crossed it in 1 of 5 runs, each side kept a
+// different one of the two connections, both were closed, and the bytes came back 44.0 s after the
+// relay.
+LT_API int lt_session_redial_cut_peers() {
+  if (!g_session) return -1;
+  boost::asio::post(*g_session->ioc, [] {
+    if (!g_session) return;
+    for (auto const& c : g_session->cut) {
+      auto t = c.t.lock();
+      if (!t) continue;
+      // the pointer is only followed once the peer list still holds it
+      auto const [first, last] = t->find_peers(c.a);
+      if (std::find(first, last, c.peer) != last && !c.peer->connection) c.peer->last_connected = 0;
+    }
+    g_session->cut.clear();
   });
   return 0;
 }

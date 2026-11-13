@@ -294,22 +294,59 @@ test('a port somebody took is given up after KEEP_PORT_MS, and the next outage a
   assert.equal(st.localPort, 6882)
 })
 
-test('a socket back after more than REDIAL_AFTER_MS hands its uTP peers to a redial, once, and a blip or a first bind does not', (t) => {
+/** A socket on a relay that can be taken away, and the calls it makes into the engine, timed. */
+const redialRig = (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
   const relay = makeRelayDgram()
-  let redials = 0
-  const { FKN, st, drop } = relayUdpState(t, relay, { _lt_session_redial_utp_peers: () => { redials++ } })
-  assert.equal(redials, 0, 'the first bind redialled')
-
-  for (const [awayMs, expected] of [[5_000, 1], [1_000, 1], [5_000, 2]]) {
+  const calls = []
+  const rig = relayUdpState(t, relay, {
+    _lt_session_cut_utp_peers: () => { calls.push({ what: 'cut', at: Date.now() }) },
+    _lt_session_redial_cut_peers: () => { calls.push({ what: 'redial', at: Date.now() }) },
+  })
+  // the relay away `ms`, then back: when the socket healed
+  const outage = (ms) => {
     relay.away = true
-    drop()
-    drop()
-    advance(t, awayMs)
-    assert.equal(redials, expected - (awayMs > FKN.REDIAL_AFTER_MS ? 1 : 0), 'a redial before the socket was back')
+    rig.drop()
+    rig.drop()
+    advance(t, ms)
     relay.away = false
-    advance(t, 2_100)
-    assert.equal(st.socket.granted, 6882)
-    assert.equal(redials, expected, `a relay away ${awayMs} ms left ${redials} redials in all`)
+    for (let i = 0; i < 250 && !rig.healed(); i++) t.mock.timers.tick(STEP)
+    assert.ok(rig.healed(), `not back 2.5 s after a relay away ${ms} ms`)
+    return Date.now()
   }
+  return { ...rig, calls, outage }
+}
+
+test('a socket back after more than REDIAL_AFTER_MS cuts its uTP peers, once, and a blip or a first bind does not', (t) => {
+  const { FKN, calls, outage } = redialRig(t)
+  assert.deepEqual(calls, [], 'the first bind cut its peers')
+
+  for (const [awayMs, cut] of [[5_000, true], [1_000, false], [20_000, true]]) {
+    const from = calls.length
+    const healedAt = outage(awayMs)
+    advance(t, FKN.REDIAL_WAIT_MS + STEP)
+    const after = calls.slice(from).map((c) => c.what)
+    assert.deepEqual(after, cut ? ['cut', 'redial'] : ['redial'], `a relay away ${awayMs} ms, healed ${healedAt - 1_000_000} ms in`)
+  }
+})
+
+test('the cut peers are dialled again once the socket has stayed up REDIAL_WAIT_MS, not into a socket that went away again', (t) => {
+  const { FKN, calls, outage } = redialRig(t)
+
+  // back, and away again 1 s later: nothing is dialled until a socket lasts
+  outage(20_000)
+  advance(t, 1_000)
+  const second = outage(20_000)
+  advance(t, FKN.REDIAL_WAIT_MS + STEP)
+  assert.deepEqual(calls.map((c) => c.what), ['cut', 'cut', 'redial'])
+  assert.ok(calls[2].at - second >= FKN.REDIAL_WAIT_MS && calls[2].at - second <= FKN.REDIAL_WAIT_MS + 2 * STEP, `dialled ${calls[2].at - second} ms after the socket was back`)
+
+  // a short outage right after a cut still dials the cut peers once the socket lasts
+  calls.length = 0
+  outage(20_000)
+  advance(t, 500)
+  const blip = outage(1_000)
+  advance(t, FKN.REDIAL_WAIT_MS + STEP)
+  assert.deepEqual(calls.map((c) => c.what), ['cut', 'redial'])
+  assert.ok(calls[1].at - blip >= FKN.REDIAL_WAIT_MS, 'dialled before the socket had lasted')
 })
