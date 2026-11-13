@@ -27,6 +27,7 @@ const rig = (t, { rtc = fakeRtc(), more = {}, defaults = [TRACKER], ...options }
   const peers = webtorrentPeers(session, {
     links: rtcLinks({ RTCPeerConnection: rtc }), WebSocket, trackers: defaults ?? undefined, ...options,
   })
+  session.changed = () => peers.refresh()
   t.after(() => peers.close())
   t.after(() => assert.equal(rtc.stats.early, 0, 'a connection was closed during a signalling step, or sooner than 5 ms after one'))
   const self = {
@@ -1120,7 +1121,7 @@ test('a torrent paused and resumed before the tracker has answered the pause sti
   assert.equal(r.offered(1).length, 2, 'the count that left us out is not the one the offers follow')
 })
 
-test('a torrent paused by the queue, with no event, is noticed within a beat', async t => {
+test('a torrent paused by the queue, with no refresh, is noticed within a beat', async t => {
   const r = rig(t)
   await r.start(1)
   r.session.set(1, { running: false })
@@ -1128,7 +1129,56 @@ test('a torrent paused by the queue, with no event, is noticed within a beat', a
   assert.equal(r.tracker.announces(hashOf(1)).at(-1).event, 'stopped')
 })
 
-test('a torrent that left the session with no event is noticed within a beat', async t => {
+test('refresh acts on what the session says now, where the swarm alone would at its next second', async t => {
+  const r = rig(t)
+  await r.start(1)
+  r.session.set(1, { running: false })
+  await settle()
+  assert.equal(r.tracker.announces(hashOf(1)).at(-1).event, 'started', 'the swarm read the session with no beat and no refresh')
+  r.peers.refresh()
+  await settle()
+  assert.equal(r.tracker.announces(hashOf(1)).at(-1).event, 'stopped')
+})
+
+test('the engine\'s status decides what runs: a torrent that is paused, in error or checking is not announced', async t => {
+  const r = rig(t)
+  const idle = { paused: { paused: true }, 'in error': { errorCode: 28 }, 'checking its files': { state: 1 }, 'checking its resume data': { state: 7 } }
+  let handle = 1
+  for (const [what, status] of Object.entries(idle)) {
+    await r.start(handle, { status })
+    await advance(t, 2 * SECOND)
+    assert.equal(r.tracker.announces(hashOf(handle)).length, 0, `a torrent that is ${what} was announced`)
+    // the same torrent once the engine reports it downloading
+    r.session.set(handle, { status: { state: 3 } })
+    r.peers.refresh()
+    await settle()
+    assert.equal(r.tracker.announces(hashOf(handle)).length, 1, `a torrent that was ${what} and is not any more`)
+    handle++
+  }
+})
+
+test('a tracker is told the bytes still wanted and the payload of this session, as the engine counts them', async t => {
+  const r = rig(t)
+  await r.start(1, { status: { totalWanted: 5000, totalDone: 1200, sessionPayloadUpload: 70, sessionPayloadDownload: 90, allTimeUpload: 7000, allTimeDownload: 9000 } })
+  const { left, uploaded, downloaded } = r.tracker.announces(hashOf(1))[0]
+  assert.deepEqual({ left, uploaded, downloaded }, { left: 3800, uploaded: 70, downloaded: 90 })
+})
+
+test('a torrent the session lists and has no status or hash for yet waits until it has both', async t => {
+  const r = rig(t)
+  await r.start(1, { status: null })
+  await r.start(2, { infoHash: null })
+  await advance(t, 2 * SECOND)
+  assert.deepEqual(r.peers.snapshot().torrents, [])
+  assert.equal(r.tracker.received.length, 0)
+  r.session.set(1, { status: undefined })
+  r.session.set(2, { infoHash: hashOf(2) })
+  await advance(t, SECOND)
+  assert.deepEqual(r.peers.snapshot().torrents.map(torrent => torrent.handle), [1, 2])
+  assert.deepEqual([r.tracker.announces(hashOf(1)).length, r.tracker.announces(hashOf(2)).length], [1, 1])
+})
+
+test('a torrent that left the session with no refresh is noticed within a beat', async t => {
   const r = rig(t)
   await r.start(1)
   r.session.views.delete(1)
@@ -1372,7 +1422,6 @@ test('close says stopped everywhere, closes every connection and socket, and not
   await advance(t, 300 * SECOND, SECOND)
   assert.equal(r.tracker.received.length, count)
   assert.equal(changes, 0)
-  assert.deepEqual(r.session.listeners.add.size, 0)
 })
 
 test('nothing is contacted unless the caller names it: no default tracker is built in', async t => {

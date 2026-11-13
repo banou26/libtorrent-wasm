@@ -347,20 +347,25 @@ webtorrentPeers(session, {
 
 `limits` overrides the first four.
 
-### What the session has to provide
+### What it reads from the session
 
-`webtorrentPeers` takes anything with this shape (`SwarmSession`):
+`webtorrentPeers` takes the engine's `Session` as it is (`SwarmSession` names the members it uses). It reads
+them once a second, and at once when `refresh()` is called:
 
-| member | what it is |
+| member | what the swarm takes from it |
 | --- | --- |
-| `addPeerStream(handle, socket)` | hands libtorrent an open stream as a peer; throws, or destroys the stream, when it cannot. When libtorrent gives a peer up it destroys the stream: one it had read and that never delivered a byte counts its remote as silent |
 | `torrents()` | the handle of every torrent |
-| `torrent(handle)` | `{ infoHash, trackers, running, hasMetadata, private, uploaded, downloaded, left, watched }`, or null |
-| `on` / `off` | `add`, `remove`, `pause` and `resume`, each with the handle. Anything else is noticed within a second |
+| `infohash(handle)` | what it announces. Null until the session's alerts were pumped: the torrent waits |
+| `status(handle)` | whether the torrent runs (not paused, no error, not checking), whether its metadata is known, the bytes still wanted and the payload this session moved. Null until a status was pumped: the torrent waits |
+| `isPrivate(handle)` | a private torrent is announced to its own trackers only, and so is one whose flag is not known yet |
+| `webSocketTrackers(handle)` | the torrent's own `ws` and `wss` trackers |
+| `hasStreamWindow(handle)` | a torrent somebody is reading is served before the others |
+| `addPeerStream(handle, socket)` | hands libtorrent an open stream as a peer. When libtorrent gives a peer up it destroys the stream: one it had read and that never delivered a byte counts its remote as silent |
 | `peers(handle)` | only with `relay: true`: the torrent's ordinary peers, by `endpoint`. Asked every 10 s for each running torrent, and when a channel opens |
 
-`trackers` is `trackersOf(magnet or .torrent bytes)`: libtorrent drops `ws` and `wss` trackers when it parses
-either, so they have to be read from what the torrent was added from.
+The swarm asks for no status and pumps no alert: both stay with the session's owner (`postStatus`,
+`popAlerts`), and what the swarm sees is what was pumped last. `refresh()` right after a pump, or after a
+torrent was removed, makes it act on that at once.
 
 ### What the WebRTC class has to have
 

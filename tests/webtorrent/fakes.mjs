@@ -449,13 +449,15 @@ export const handlersOf = pc => [
 ].filter(handler => handler != null)
 
 /**
- * A session as the swarm sees one. `dials` decides whether a stream handed over is read at once, the way
- * libtorrent's dial reads it; `speaks` makes it write its handshake in the same call; `refuses` makes
+ * A session as the swarm reads the engine's: a case writes a torrent as a plain view, and the session answers
+ * for it through the engine's own members. `dials` decides whether a stream handed over is read at once, the
+ * way libtorrent's dial reads it; `speaks` makes it write its handshake in the same call; `refuses` makes
  * addPeerStream throw.
  */
 export class FakeSession {
   views = new Map()
-  listeners = { add: new Set(), remove: new Set(), pause: new Set(), resume: new Set() }
+  /** Called after add, remove, pause and resume: a rig points it at its swarm's refresh(). `set` is silent. */
+  changed = null
   /** Every stream handed over: { handle, socket, bytes: Buffer[], closed }. */
   streams = []
   ordinary = new Map()
@@ -467,12 +469,13 @@ export class FakeSession {
   /** addPeerStream takes the stream and destroys it before it returns, as the engine does for a torrent it has not. */
   destroys = false
 
+  /** `status` in a view is laid over the status the session answers with, and null makes it answer none. */
   add(handle, view = {}) {
     this.views.set(handle, {
       infoHash: hashOf(handle), trackers: [], running: true, hasMetadata: true, private: false,
       uploaded: 0, downloaded: 0, left: 1000, watched: false, ...view,
     })
-    this.emit('add', handle)
+    this.changed?.()
   }
 
   set(handle, patch) {
@@ -481,38 +484,47 @@ export class FakeSession {
 
   remove(handle) {
     this.views.delete(handle)
-    this.emit('remove', handle)
+    this.changed?.()
   }
 
   pause(handle) {
     this.set(handle, { running: false })
-    this.emit('pause', handle)
+    this.changed?.()
   }
 
   resume(handle) {
     this.set(handle, { running: true })
-    this.emit('resume', handle)
-  }
-
-  emit(event, handle) {
-    for (const listener of [...this.listeners[event]]) listener(handle)
-  }
-
-  on(event, listener) {
-    this.listeners[event].add(listener)
-  }
-
-  off(event, listener) {
-    this.listeners[event].delete(listener)
+    this.changed?.()
   }
 
   torrents() {
-    return this.views.keys()
+    return [...this.views.keys()]
   }
 
-  torrent(handle) {
+  infohash(handle) {
+    return this.views.get(handle)?.infoHash ?? null
+  }
+
+  status(handle) {
     const view = this.views.get(handle)
-    return view ? { ...view } : null
+    if (!view || view.status === null) return null
+    return {
+      state: view.hasMetadata ? 3 : 2, paused: !view.running, errorCode: 0, hasMetadata: view.hasMetadata,
+      totalWanted: view.left, totalDone: 0, sessionPayloadUpload: view.uploaded, sessionPayloadDownload: view.downloaded,
+      ...view.status,
+    }
+  }
+
+  isPrivate(handle) {
+    return this.views.get(handle)?.private
+  }
+
+  webSocketTrackers(handle) {
+    return this.views.get(handle)?.trackers ?? []
+  }
+
+  hasStreamWindow(handle) {
+    return this.views.get(handle)?.watched ?? false
   }
 
   async peers(handle) {

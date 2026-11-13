@@ -19,6 +19,7 @@ const HANDLE = 1
 const swarm = (t, { RTCPeerConnection, WebSocket, url }) => {
   const session = new FakeSession()
   const peers = webtorrentPeers(session, { links: rtcLinks({ RTCPeerConnection, iceServers: [] }), WebSocket, trackers: [url] })
+  session.changed = () => peers.refresh()
   t.after(() => peers.close())
   return { session, peers, state: () => peers.snapshot().torrents[0] }
 }

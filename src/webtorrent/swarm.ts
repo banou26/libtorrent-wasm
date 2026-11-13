@@ -1,13 +1,22 @@
+import type { Session } from '../index'
 import { LinksFull, type Link, type Links } from './links'
-import type { PeerStream, Stream } from './stream'
+import type { Stream } from './stream'
 import { binaryHash, offerId, peerId, Tracker, type Relayed, type WebSocketClass } from './tracker'
 import { trackerUrl } from './trackers'
 
+/**
+ * The members of the engine's `Session` the swarm uses, so a session is passed as it is. `peers` is only read
+ * with `relay`. `status` is what the session's owner last pumped: the swarm asks for no status and pumps no
+ * alert itself.
+ */
+export type SwarmSession =
+  Pick<Session, 'addPeerStream' | 'torrents' | 'infohash' | 'status' | 'isPrivate' | 'webSocketTrackers' | 'hasStreamWindow'>
+  & Partial<Pick<Session, 'peers'>>
+
 /** What the swarm reads about one torrent, each time it decides something. */
-export type SwarmTorrent = {
+type View = {
   /** The v1 info hash as 40 hex characters, or the first 40 of a v2-only torrent's. */
   infoHash: string
-  /** The `ws` and `wss` trackers the torrent names: `trackersOf` what it was added from. */
   trackers: readonly string[]
   /** Not paused by the person or by the queue, not checking, no error. */
   running: boolean
@@ -18,20 +27,30 @@ export type SwarmTorrent = {
   downloaded: number
   /** Bytes still wanted. Read only once the metadata is known. */
   left: number
-  /** Somebody is watching it: it is served before the others. */
+  /** Somebody is reading it: it is served before the others. */
   watched: boolean
 }
 
-/** The part of a session the swarm needs. `peers` is only read with `relay`. */
-export type SwarmSession = {
-  /** Hands libtorrent an open stream as a peer it dials. A torrent that cannot take it throws, or destroys the stream. */
-  addPeerStream(handle: number, socket: PeerStream): { address: string, port: number }
-  torrents(): Iterable<number>
-  /** Null once the session no longer has the torrent. */
-  torrent(handle: number): SwarmTorrent | null
-  on(event: 'add' | 'remove' | 'pause' | 'resume', listener: (handle: number) => void): void
-  off(event: 'add' | 'remove' | 'pause' | 'resume', listener: (handle: number) => void): void
-  peers?(handle: number): Promise<ReadonlyArray<{ endpoint: string }>>
+// torrent_status::state_t, the engine's TORRENT_STATE.checkingFiles and checkingResumeData
+const CHECKING = [1, 7]
+
+/** Null while the session has nothing to say of the torrent: it is gone, or none of its status was pumped yet. */
+const viewOf = (session: SwarmSession, handle: number): View | null => {
+  const status = session.status(handle)
+  const infoHash = session.infohash(handle)
+  if (!status || !infoHash) return null
+  return {
+    infoHash,
+    trackers: session.webSocketTrackers(handle),
+    running: !status.paused && status.errorCode === 0 && !CHECKING.includes(status.state),
+    hasMetadata: status.hasMetadata,
+    private: session.isPrivate(handle),
+    // what libtorrent itself tells a tracker: the payload of this session
+    uploaded: status.sessionPayloadUpload,
+    downloaded: status.sessionPayloadDownload,
+    left: status.totalWanted - status.totalDone,
+    watched: session.hasStreamWindow(handle),
+  }
 }
 
 export type Limits = {
@@ -126,6 +145,11 @@ export type Snapshot = {
 export type WebtorrentPeers = {
   /** Says `stopped` to every tracker and closes every connection and socket. */
   close(): void
+  /**
+   * Reads the session now, where the swarm would at its next second: for a caller that has just pumped the
+   * session's status, or removed a torrent, and wants that acted on at once.
+   */
+  refresh(): void
   snapshot(): Snapshot
   /** Called after the snapshot changed, at most once a task. */
   onchange: (() => void) | null
@@ -182,7 +206,7 @@ type Memory = {
 type Torrent = Memory & {
   handle: number
   hash: string
-  view: SwarmTorrent
+  view: View
   announcing: Map<string, Announcing>
   conns: Set<Conn>
   offers: Map<string, Conn>
@@ -196,13 +220,13 @@ type Torrent = Memory & {
 /** The last announce has had neither a reply nor a refusal yet. */
 const unanswered = (announcing: Announcing): boolean => (announcing.answeredAt ?? 0) < announcing.sentAt
 
-const seeding = (view: SwarmTorrent): boolean => view.hasMetadata && view.left <= 0
+const seeding = (view: View): boolean => view.hasMetadata && view.left <= 0
 
-const rank = (view: SwarmTorrent): keyof typeof RESERVE =>
+const rank = (view: View): keyof typeof RESERVE =>
   view.watched ? 'watched' : seeding(view) ? 'seeding' : 'downloading'
 
 /** Its own trackers that are not local names, and the defaults once it is known not to be private. */
-const trackersFor = (view: SwarmTorrent, defaults: readonly string[]): string[] => {
+const trackersFor = (view: View, defaults: readonly string[]): string[] => {
   const own = view.trackers.map(trackerUrl).filter(url => url !== null)
   return [...new Set(view.private === false ? [...own, ...defaults] : own)]
 }
@@ -367,7 +391,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       if (t.ordinary.has(address)) return drop(conn)
       for (const quiet of t.quiet.values()) if (quiet.address === address) return drop(conn)
     }
-    if (!conn.remote || !session.torrent(t.handle)?.running) return drop(conn)
+    if (!conn.remote || !viewOf(session, t.handle)?.running) return drop(conn)
     try {
       session.addPeerStream(t.handle, socket)
     } catch {
@@ -546,7 +570,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
 
   /** Brings what the swarm holds for one torrent in line with what the session says of it now. */
   const reconcile = (handle: number) => {
-    const view = session.torrent(handle)
+    const view = viewOf(session, handle)
     let t = torrents.get(handle)
     if (!view) memories.delete(handle)
     if (!view?.running) {
@@ -600,9 +624,13 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     }
   }
 
+  const reconcileAll = () => {
+    for (const handle of new Set([...session.torrents(), ...torrents.keys()])) reconcile(handle)
+  }
+
   const beat = () => {
     const now = Date.now()
-    for (const handle of new Set([...session.torrents(), ...torrents.keys()])) reconcile(handle)
+    reconcileAll()
     for (const t of torrents.values()) {
       for (const conn of t.conns) {
         if (now < conn.deadline) continue
@@ -621,23 +649,20 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     announce()
   }
 
-  const refresh = (handle: number) => {
-    reconcile(handle)
-    prune()
-    announce()
-  }
-
-  const events = ['add', 'remove', 'pause', 'resume'] as const
-
   const peers: WebtorrentPeers = {
     onchange: null,
     close: () => {
       if (closed) return
       closed = true
       clearInterval(timer)
-      for (const event of events) session.off(event, refresh)
       for (const t of torrents.values()) stop(t)
       prune()
+    },
+    refresh: () => {
+      if (closed) return
+      reconcileAll()
+      prune()
+      announce()
     },
     snapshot: () => ({
       dropped: [...trackers.values()].reduce((sum, tracker) => sum + tracker.dropped, dropped),
@@ -660,7 +685,6 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     }),
   }
 
-  for (const event of events) session.on(event, refresh)
   const timer = setInterval(beat, BEAT_MS)
   beat()
   return peers

@@ -120,6 +120,7 @@ const ours = (t, url, view) => {
   const peers = webtorrentPeers(session, {
     links: rtcLinks({ RTCPeerConnection: nativeRtc.RTCPeerConnection, iceServers: [] }), WebSocket, trackers: [url],
   })
+  session.changed = () => peers.refresh()
   t.after(() => peers.close())
   session.add(1, view)
   return { session, peers }
