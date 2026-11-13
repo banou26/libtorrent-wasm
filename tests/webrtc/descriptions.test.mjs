@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createWebRTC, gathered, wasm } from './rig/local.mjs'
+import { createWebRTC, gathered, once, wasm } from './rig/local.mjs'
 import { network } from './rig/memory-network.mjs'
 import { traced } from './rig/trace.mjs'
 
@@ -130,6 +130,21 @@ test('an offer needs a data channel, and a channel is ordered and reliable or re
   const channel = pc.createDataChannel('fine', { ordered: true, protocol: '' })
   assert.equal(channel.label, 'fine')
   assert.equal(channel.readyState, 'connecting')
+  assert.equal((await pc.createOffer()).type, 'offer')
+})
+
+test('a channel closed before the stack was given it closes, with its event', async (t) => {
+  const local = await factory()
+  t.after(local.close)
+  const pc = new local.RTCPeerConnection()
+  pc.createDataChannel('the one in the offer')
+  // waits for an answer, and so for an association to be opened on
+  const waiting = pc.createDataChannel('waiting')
+  const closed = once(waiting, 'close', 3000)
+  waiting.close()
+  assert.equal(waiting.readyState, 'closing')
+  await closed
+  assert.equal(waiting.readyState, 'closed')
   assert.equal((await pc.createOffer()).type, 'offer')
 })
 

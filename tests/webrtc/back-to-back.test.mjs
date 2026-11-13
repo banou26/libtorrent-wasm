@@ -47,9 +47,12 @@ function drained(calls, names) {
 
 test('two factories with no network move 8 MiB each way, hashes equal', async (t) => {
   const { A, B, a, b } = await facing(t)
+  const states = { offering: [], answering: [] }
+  a.onconnectionstatechange = () => states.offering.push(a.connectionState)
+  b.onconnectionstatechange = () => states.answering.push(b.connectionState)
   const [ours, theirs] = await pair(a, b)
   assert.equal(theirs.label, ours.label)
-  assert.equal(a.connectionState, 'connected')
+  assert.deepEqual(states, { offering: ['connecting', 'connected'], answering: ['connecting', 'connected'] })
 
   for (const [from, to] of [
     [ours, theirs],
@@ -79,6 +82,46 @@ test('text and binary messages arrive as they were sent, in order', async (t) =>
   assert.deepEqual(got, ['first', new Uint8Array([1, 2, 3]), new Uint8Array([9, 8, 7, 6]), new Uint8Array([5, 6]), 'last \u00e9\u2603'])
   assert.equal(theirs.binaryType, 'arraybuffer')
   assert.throws(() => (theirs.binaryType = 'blob'), { name: 'NotSupportedError' })
+})
+
+test('channels made before the offer all open, and the peer hears of each', async (t) => {
+  const { a, b } = await facing(t)
+  const labels = []
+  b.ondatachannel = ({ channel }) => labels.push(channel.label)
+  // pair() makes `one` as it is called, so all three exist before the offer does
+  const connecting = pair(a, b, 'one')
+  const later = [a.createDataChannel('two'), a.createDataChannel('three')]
+  await connecting
+  await Promise.all(later.map((channel) => channel.readyState === 'open' || once(channel, 'open', 3000)))
+  while (labels.length < 3) await once(b, 'datachannel', 3000)
+  assert.deepEqual(labels.sort(), ['one', 'three', 'two'])
+})
+
+test('a handler that throws is reported as uncaught and stops nothing: the next messages arrive', async (t) => {
+  const { a, b } = await facing(t)
+  const [ours, theirs] = await pair(a, b)
+  // node:test fails the running test for an uncaught error. This one is the point, so it is taken here.
+  const harness = process.listeners('uncaughtException')
+  const uncaught = []
+  process.removeAllListeners('uncaughtException')
+  process.on('uncaughtException', (error) => uncaught.push(error.message))
+  t.after(() => {
+    process.removeAllListeners('uncaughtException')
+    for (const listener of harness) process.on('uncaughtException', listener)
+  })
+
+  const got = []
+  theirs.onmessage = ({ data }) => {
+    got.push(data)
+    if (data === 'one') throw new Error('thrown by onmessage')
+  }
+  for (const text of ['one', 'two', 'three']) ours.send(text)
+  while (got.length < 3) await once(theirs, 'message', 3000)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(got, ['one', 'two', 'three'])
+  assert.deepEqual(uncaught, ['thrown by onmessage'])
+  assert.equal(b.connectionState, 'connected')
+  assert.equal(theirs.readyState, 'open')
 })
 
 test('every call into a connection is drained to the end before the next, and a description is followed by the time', async (t) => {

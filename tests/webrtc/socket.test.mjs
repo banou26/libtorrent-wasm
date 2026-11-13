@@ -22,7 +22,7 @@ async function star(t, remotes) {
     const ours = new local.webrtc.RTCPeerConnection()
     const theirs = new remote.webrtc.RTCPeerConnection()
     const [channel, far] = await pair(ours, theirs, `link ${i}`)
-    links.push({ ours, theirs, channel, far })
+    links.push({ ours, theirs, channel, far, remote: remote.webrtc })
   }
   return { local, links, socket }
 }
@@ -79,6 +79,18 @@ test('a datagram that belongs to no connection is dropped and counted', async (t
   channel.send(new Uint8Array([1, 2, 3, 4, 5]))
   assert.equal((await arriving).bytes, 5)
   assert.equal(webrtc.droppedDatagrams, 5)
+})
+
+test('a closed connection lets go of its remote address: the next one between the same two sockets connects', { timeout: 10_000 }, async (t) => {
+  const { local, links } = await star(t, 1)
+  const [{ ours, theirs, remote }] = links
+  ours.close()
+  theirs.close()
+  // what a peer that comes back from the same address and port is
+  const [channel, far] = await pair(new local.webrtc.RTCPeerConnection(), new remote.RTCPeerConnection())
+  const arriving = once(far, 'message', 3000)
+  channel.send('again')
+  assert.equal((await arriving).data, 'again')
 })
 
 test('a socket error ends every connection: each channel gets error, then close, and the state is failed', async (t) => {
