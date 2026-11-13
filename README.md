@@ -272,17 +272,17 @@ webtorrentPeers(session, {
   descriptions are read, and an offer that arrives while there is room is answered as soon as ours is read: no
   interval and no timer of the swarm's sits in between. In a swarm of libtorrent 2.1 peers (qBittorrent) the
   first batch is most of what a session gets, since the first one that connects passes our address on and the
-  others then stay silent.
+  others then have no use for our channels.
 - **One channel per remote per torrent.** A remote is the peer id of its tracker messages, which for a libtorrent
   2.1 peer is never the id in its BitTorrent handshake, so the two are never compared. An open channel wins: an
   offer or an answer that arrives from its remote opens nothing beside it. Of an offer of ours and one of theirs
   that cross, both ends keep the one from the smaller tracker id. The attempt that loses is closed at our end
-  every time, since a libtorrent 2.1 peer never closes its own.
+  every time: it is never left for the remote to close.
 - **A remote that never says a word is left alone.** When a channel that opened ends before a single byte came
   from its remote, the remote's offers are not answered and its answers not taken for 10 minutes, and with
   `relay` no channel from its address is taken either. That is how a libtorrent 2.1 peer that will not talk to
   this address looks: it answers, the channel opens, and nothing comes. Chrome 156 and libdatachannel see it end
-  the channel within a millisecond of its opening; the reference client's stack sees it stay open until
+  the channel as it opens, 0 to 1 ms later in Chrome; the reference client's stack sees it stay open until
   libtorrent's handshake timeout ends the stream, 10.4 to 12.7 s later. Both count. A remote that sent one byte
   never does, nor does a channel the swarm closed itself, nor a stream the engine let go without reading it.
   `snapshot()` counts these remotes per torrent (`silent`), so an interface can tell peers that refuse this

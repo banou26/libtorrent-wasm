@@ -490,7 +490,7 @@ test('a remote is the peer id of its tracker messages, never the one in its hand
   await settle()
   assert.equal(Buffer.concat(r.session.streams[0].bytes).length, 68)
 
-  // Under its tracker id nothing opens beside the channel, and it closes nothing, as a 2.1 peer never does.
+  // Under its tracker id nothing opens beside the channel. It closes nothing: what loses is ours to close.
   assert.equal(await remote.connect(1), false, 'its offer is not answered')
   await remote.answer(1, r.offered(1)[0].offers[0])
   await advance(t, CLOSING)
@@ -575,7 +575,7 @@ for (const [prefix, kept] of [['-AA0001-', 'theirs'], ['-ZZ0001-', 'ours']]) {
     assert.equal(r.session.streamsOf(1).length, 1, 'exactly one channel reached libtorrent')
     assert.equal(r.peers.snapshot().torrents[0].pending, 0)
     assert.deepEqual([remote.opened.has(theirs), remote.opened.has(answering)], [kept === 'theirs', kept === 'ours'], 'the attempt that goes on is the smaller id’s offer')
-    assert.equal(r.open(), 1, 'and the other one’s connection is closed at our end: the remote, like a libtorrent 2.1 peer, closes nothing')
+    assert.equal(r.open(), 1, 'and the other one’s connection is closed at our end: this remote closes nothing, so it is ours to close')
   }
 
   test(`of our offer and a remote's, both pending, the one from the smaller id is kept: ${kept} against ${prefix}`, async t => {
@@ -700,7 +700,7 @@ test('a remote that sent even one byte is never counted silent, nor one whose st
   for (const remote of [spoke, undialled, dropped]) assert.equal(await remote.connect(1), true, 'each is answered again after the 60 s')
 })
 
-// What Chrome 156 sees of a libtorrent 2.1 peer that has no use for a channel: it ends 1 ms after it opened.
+// What Chrome 156 sees of a libtorrent 2.1 peer that has no use for a channel: it ends 0 to 1 ms after it opened.
 for (const dialled of [true, false]) {
   test(`a remote that ends its channel before it has sent a byte is left alone for ten minutes too, ${dialled ? 'read by the engine by then' : 'before the engine read it'}`, async t => {
     const r = rig(t)

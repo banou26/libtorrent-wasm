@@ -70,9 +70,9 @@ export class Stream implements PeerStream {
   }
 
   // What a libtorrent 2.1.1 peer that has no use for a channel looks like from here (2026-11-13): Chrome 156
-  // and libdatachannel see it end the channel within a millisecond of its opening (3 and 5 channels), and the
-  // reference client's stack sees it stay open and silent until libtorrent's handshake timeout, 10.4 to
-  // 12.7 s later (50 channels).
+  // and libdatachannel see it end the channel as it opens, 0 to 1 ms later in 10 channels and 0 to 14 ms in
+  // 11, and the reference client's stack sees it stay open and silent until libtorrent's handshake timeout,
+  // 10.4 to 12.7 s later (50 channels).
   /**
    * It has ended and the remote never sent a byte, whichever end closed it. A stream its reader let go without
    * ever reading it does not count: that says nothing about the remote.
