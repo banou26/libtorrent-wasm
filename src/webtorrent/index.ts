@@ -1,3 +1,7 @@
+export { webtorrentPeers, LIMITS } from './swarm'
+export type {
+  Limits, Snapshot, SwarmSession, SwarmTorrent, TorrentPeers, TrackerState, WebtorrentPeers, WebtorrentPeersOptions,
+} from './swarm'
 export { DEFAULT_ICE_SERVERS, LinksFull, rtcLinks } from './links'
 export type { DataChannelLike, Link, Links, Made, PeerConnectionLike, RtcLinks, RtcLinksOptions } from './links'
 export { pageLinks } from './page'
