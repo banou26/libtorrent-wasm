@@ -177,11 +177,15 @@ test('a socket whose send throws on what waits fails its connections, and nothin
   assert.deepEqual(events, ['error OperationError: the socket failed: not running', 'close closed', 'failed'])
 })
 
-test('closing a factory with more connections than the bound tells every peer', { timeout: 60_000 }, async (t) => {
+test('closing a factory with more connections than the bound tells every peer, inside close()', { timeout: 60_000 }, async (t) => {
   // the last word of each connection is a datagram: 130 of them at once, where a task hands over 128
   const { local, links } = await star(t, 130)
   const told = Promise.all(links.map(({ theirs }) => once(theirs, 'connectionstatechange', 3000)))
+  const { sent } = local.socket
+  const before = sent.length
   local.webrtc.close()
+  // the caller may close its socket next, so none of them waits for a later millisecond
+  assert.ok(sent.length - before >= 130, `close() handed the socket ${sent.length - before} datagrams for 130 connections`)
   await told
   assert.deepEqual([...new Set(links.map(({ theirs }) => theirs.connectionState))], ['failed'])
 })
