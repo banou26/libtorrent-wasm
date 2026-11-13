@@ -48,12 +48,15 @@ export class ScriptedPeer {
   enginePexId = null
   #socket = null
   #serve
+  #reqq
 
-  constructor({ infoHash, port, serve = null, socket = null }) {
+  /** `reqq` is how many requests this peer says it takes at once (BEP 10), 0 to say nothing. */
+  constructor({ infoHash, port, serve = null, socket = null, reqq = 0 }) {
     this.infoHash = Buffer.from(infoHash, 'hex')
     this.port = port
     this.#serve = serve
     this.#socket = socket
+    this.#reqq = reqq
   }
 
   /** Resolves once the engine's handshake is back and this peer's opening messages are sent. */
@@ -82,7 +85,8 @@ export class ScriptedPeer {
           buf = buf.subarray(68)
           shookHands = true
           socket.write(frame(MSG.extended, Buffer.concat([
-            Buffer.from([0]), Buffer.from(`d1:md11:lt_donthavei${DONT_HAVE_ID}e6:ut_pexi${PEX_ID}eee`),
+            Buffer.from([0]),
+            Buffer.from(`d1:md11:lt_donthavei${DONT_HAVE_ID}e6:ut_pexi${PEX_ID}ee${this.#reqq ? `4:reqqi${this.#reqq}e` : ''}e`),
           ])))
           if (this.#serve) socket.write(Buffer.concat([frame(MSG.haveAll), frame(MSG.unchoke)]))
           else socket.write(Buffer.concat([frame(MSG.haveNone), frame(MSG.interested)]))

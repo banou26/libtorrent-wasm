@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Banou <me@banou.dev>
+Date: Fri, 13 Nov 2026 16:00:00 +0900
+Subject: [PATCH] fix: reqq never raises the request queue past our limit
+
+---
+diff --git a/src/bt_peer_connection.cpp b/src/bt_peer_connection.cpp
+index fa065b682..dfb4390ba 100644
+--- a/src/bt_peer_connection.cpp
++++ b/src/bt_peer_connection.cpp
+@@ -2048,7 +2048,11 @@ namespace {
+ 		}
+ 
+ 		int const reqq = int(root.dict_find_int_value("reqq"));
+-		if (reqq > 0) max_out_request_queue(reqq);
++		// WASM patch: what a peer says it takes lowers the request queue and never raises it past
++		// max_out_request_queue, which settings_pack.hpp says is never exceeded. With reqq 65535
++		// the engine asked one peer for 128 MiB at once, 8192 blocks, against a setting of 5000.
++		if (reqq > 0) max_out_request_queue(std::min(reqq
++			, m_settings.get_int(settings_pack::max_out_request_queue)));
+ 
+ 		if (root.dict_find_int_value("upload_only", 0))
+ 			set_upload_only(true);

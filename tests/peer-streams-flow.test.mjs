@@ -74,19 +74,23 @@ test('a stream whose unread bytes pass maxRecvQueue is destroyed, and the engine
   assert.equal(session.status(handle).numPeers, 0)
 })
 
-test('a peer that answers every request at once stays under the bound addPeerStream sets', async (t) => {
+test('a peer that takes any number of requests and answers each at once stays under the bound addPeerStream sets', async (t) => {
   const defer = teardown(t)
   const PIECE = MiB
-  const fx = fixture(defer, 128 * MiB, PIECE)
+  // The engine asks for twice as much every round, so the torrent has to be this big for a round
+  // to pass the bound: one of 8192 blocks, 128 MiB, needs 8191 blocks asked for before it.
+  const fx = fixture(defer, 384 * MiB, PIECE)
   const leech = await startEngine(defer, path.join(fx.root, 'leech'))
   const { session } = leech
   const handle = await leech.running(session.addTorrentFile(fx.meta.torrent, '/dl'))
 
   const [ours, theirs] = streamPipe()
-  // sends no reqq, as WebTorrent sends none, so the engine's own request window applies
+  // It says it takes 65535 requests at once, the most libtorrent reads. The engine's own limit of
+  // 5000 holds all the same (patch 0012), as it does for a peer that says nothing, like WebTorrent.
   const seed = new ScriptedPeer({
     infoHash: fx.meta.infoHash,
     socket: theirs,
+    reqq: 65535,
     serve: (piece, offset, length) => fx.bytes.subarray(piece * PIECE + offset, piece * PIECE + offset + length),
   })
   seed.connect()
@@ -108,8 +112,9 @@ test('a peer that answers every request at once stays under the bound addPeerStr
   await waitFor('the download', () => done(session, handle) || ours.destroyError, 120_000)
   assert.equal(ours.destroyError, null, `closed with ${peakUnread} bytes unread`)
   assert.ok(done(session, handle))
-  // the 32 MiB an earlier design gave such a socket: without passing it this run proves nothing
-  assert.ok(peakUnread > 32 * MiB, `only ${peakUnread} bytes were ever unread`)
+  // 5000 blocks are 78 MiB and the round before them is 64 MiB: under this the engine never asked
+  // for all it may, and the run proves nothing
+  assert.ok(peakUnread > 72 * MiB, `only ${peakUnread} bytes were ever unread`)
   assert.ok(peakUnread < 96 * MiB)
   t.diagnostic(`peak unread ${(peakUnread / MiB).toFixed(2)} MiB`)
 })

@@ -555,6 +555,7 @@ LT_API int lt_session_create() {
   sp.set_int(lt::settings_pack::send_buffer_low_watermark, 512 * 1024);
   sp.set_int(lt::settings_pack::send_buffer_watermark_factor, 150);
   // 5000: at 20+ MiB/s x the default request_queue_time of 3s x 16 KiB blocks the desired queue size reaches ~4000; the old 1500 tripped outstanding_request_limit_reached and got peers snubbed because we could not keep them fed
+  // the receive bound of a peer stream is sized from this number (STREAM_MAX_RECV_QUEUE, src/index.ts)
   sp.set_int(lt::settings_pack::max_out_request_queue, 5000);
   sp.set_int(lt::settings_pack::connections_limit, 500);
   sp.set_int(lt::settings_pack::peer_timeout, 240);

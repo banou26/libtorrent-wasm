@@ -122,8 +122,8 @@ export interface PeerStreamSocket {
   /**
    * The unread bytes past which the engine destroys the stream, for a transport that cannot pause
    * its sender. `addPeerStream` sets it to 96 MiB when the socket does not: the 78 MiB of blocks
-   * the engine may have asked one peer for, and room for the messages around them. A lower value
-   * closes a fast peer that did nothing wrong.
+   * the engine may have asked one peer for, whatever request queue that peer advertises, and room
+   * for the messages around them. A lower value closes a fast peer that did nothing wrong.
    */
   maxRecvQueue?: number
 }

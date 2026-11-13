@@ -254,3 +254,4 @@ rerun `make apply-patches`; rejected hunks must be reconciled manually.
 | 0009 | A late time-critical piece is rescued before the first one completes. |
 | 0010 | `forget_pieces`, for a streaming storage that dropped a piece's bytes. |
 | 0011 | Peer exchange neither sends local addresses, which mean nothing to a peer outside that network, nor takes them from a peer. That covers the addresses `addPeerStream` makes up, and the local addresses a stream peer could otherwise name for the engine to dial. |
+| 0012 | A peer's `reqq` lowers the request queue and never raises it past `max_out_request_queue`, so no peer is asked for more than 5000 blocks at once, 78 MiB. The receive bound of a peer stream is sized from that. |

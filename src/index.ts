@@ -543,7 +543,8 @@ const STREAM_ADDRESSES = 1 << 22
 const STREAM_PORT = 6881
 const STREAM_DIAL_TIMEOUT_MS = 10_000
 // max_out_request_queue (wrapper.cpp) is 5000 blocks of 16 KiB, 78 MiB, and a stream cannot pause
-// its sender, so all of it can sit unread while the disk is behind
+// its sender, so all of it can sit unread while the disk is behind. Patch 0012 keeps a peer's reqq
+// from raising that number.
 const STREAM_MAX_RECV_QUEUE = 96 * 1024 * 1024
 
 /** Where an `address` or `address:port` sits in the stream range, or -1 outside it. */
