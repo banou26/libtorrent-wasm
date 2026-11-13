@@ -269,3 +269,15 @@ test("the selected pair's remote is where the data goes: null before, and never 
   assert.deepEqual(selected(a), { remote: { address: theirs.address, port: theirs.port } })
   assert.deepEqual(selected(b), { remote: { address: ours.address, port: ours.port } })
 })
+
+test('the selected pair is null again once the connection has ended, closed or failed', async (t) => {
+  const { a, b } = await facing(t)
+  await pair(a, b)
+  const selected = (pc) => pc.sctp.transport.iceTransport.getSelectedCandidatePair()
+  assert.ok(selected(a) && selected(b), 'both ends had a pair, so its going proves something')
+  a.close()
+  assert.equal(selected(a), null)
+  await once(b, 'connectionstatechange', 2000)
+  assert.equal(b.connectionState, 'failed')
+  assert.equal(selected(b), null)
+})

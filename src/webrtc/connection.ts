@@ -398,7 +398,10 @@ class Connection {
   answer: string | null = null
   state: RTCPeerConnectionState = 'new'
   gathering: RTCIceGatheringState = 'new'
-  /** Where the stack last sent data: the remote end of the pair ICE chose. Empty until it has. */
+  /**
+   * Where the stack last sent data: the remote end of the pair ICE chose. Empty until it has,
+   * and once the connection has ended.
+   */
   peerAddress = ''
   peerPort = 0
   readonly sctp = {
@@ -779,6 +782,7 @@ class Connection {
     }
     // a stack that trapped is left as it is
     if (!this.#trapped) host.x.rtc_delete(handle)
+    this.peerAddress = ''
     const channels = [...this.channels.values(), ...this.waiting]
     this.channels.clear()
     this.waiting.length = 0
