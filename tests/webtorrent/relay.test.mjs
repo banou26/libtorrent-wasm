@@ -38,13 +38,19 @@ const stackAt = async (defer, address) => {
   return webrtc.RTCPeerConnection
 }
 
-/** A session with real sockets, a listen port and the relay mode's swarm, its WebRTC socket at `address`. */
-const relaySide = async (defer, dir, Routed, { address = '127.0.0.1', through = {} } = {}) => {
+/** A session with real sockets and a listen port: the relay mode's, before its WebRTC half. */
+const relayEngine = async (defer, dir) => {
   const host = countingHost()
-  const engine = await startEngine(defer, dir, { host, reserveListenPort: true })
-  const RTCPeerConnection = await stackAt(defer, address)
-  return { ...engine, host, ...swarmOver(defer, engine, { links: rtcLinks({ RTCPeerConnection }), WebSocket: Routed, relay: true }, through) }
+  return { ...await startEngine(defer, dir, { host, reserveListenPort: true }), host }
 }
+
+/** The relay mode's WebRTC half over `engine`: the entry's class at `address` under the swarm with `relay`. */
+const withSwarm = async (defer, engine, Routed, { address = '127.0.0.1', through = {} } = {}) => {
+  const RTCPeerConnection = await stackAt(defer, address)
+  return { ...engine, ...swarmOver(defer, engine, { links: rtcLinks({ RTCPeerConnection }), WebSocket: Routed, relay: true }, through) }
+}
+
+const relaySide = async (defer, dir, Routed, options) => withSwarm(defer, await relayEngine(defer, dir), Routed, options)
 
 /** A session that holds the whole fixture and serves it to ordinary peers alone, at `bytesPerSecond`. */
 const ordinarySeed = async (defer, fx, bytesPerSecond) => {
@@ -131,9 +137,12 @@ test('one session takes pieces of one torrent from an ordinary tcp peer and from
   rtc.session.setRateLimits({ upload: MiB })
   await seed(rtc, fx, 'dl')
 
-  const leech = await relaySide(defer, path.join(fx.root, 'leech'), Routed)
-  const handle = await leech.running(leech.session.addMagnet(magnetOf(fx), '/dl'))
-  dialTcp(leech.session, handle, ORDINARY, ordinary.session.reachable().port)
+  // the swarm joins once the session has its ordinary peer, as it does behind a relay
+  const engine = await relayEngine(defer, path.join(fx.root, 'leech'))
+  const handle = await engine.running(engine.session.addMagnet(magnetOf(fx), '/dl'))
+  dialTcp(engine.session, handle, ORDINARY, ordinary.session.reachable().port)
+  await waitFor('bytes from the tcp peer', () => engine.session.status(handle)?.totalDone > 0)
+  const leech = await withSwarm(defer, engine, Routed)
   const { delivered } = await finished(leech, handle, 40_000)
 
   assert.equal(savedSha256(leech, handle), fx.sha256)
