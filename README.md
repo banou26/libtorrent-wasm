@@ -18,6 +18,7 @@ src/           # the WASM port itself
   index.ts           - public JS API (Session)
   opfs.ts            - StorageBackend impl backed by the OPFS
   types.ts           - shared TS types
+  webtorrent/        - WebRTC peers through WebSocket trackers (two optional entries, no wasm)
 src/app/       # browser harness with diagnostic pages
 dist/          # emcc output (gitignored)
 build/         # vite output + copied wasm artefacts (gitignored)
@@ -209,6 +210,143 @@ port that cannot exist.
 
 `dnsLookup` is an option of `createSession` on its own too. Without one the
 engine resolves names over HTTPS at 1.1.1.1, from the page's own network.
+
+## WebRTC peers
+
+Two optional entries find WebRTC peers through WebSocket trackers and hand each open data channel to libtorrent as
+a peer. The engine itself does not import them, and neither carries any wasm.
+
+| entry | where it runs | what it is |
+| --- | --- | --- |
+| `libtorrent-wasm/webtorrent` | the engine worker | the tracker client, the swarm's rules, and the links to a WebRTC implementation |
+| `libtorrent-wasm/webtorrent/page` | the page that owns the worker | makes the browser's peer connections for the worker and carries their bytes over one `MessagePort` |
+
+A worker has no `RTCPeerConnection` in any browser, so with the browser's own WebRTC the connections are made in
+the page and every decision stays in the worker:
+
+```js
+// the engine worker
+import { webtorrentPeers, pageLinks, DEFAULT_TRACKERS } from 'libtorrent-wasm/webtorrent'
+
+const { port1, port2 } = new MessageChannel()
+postMessage({ type: 'peer-links', port: port2 }, [port2])
+const peers = webtorrentPeers(session, { links: pageLinks(port1), WebSocket, trackers: DEFAULT_TRACKERS })
+peers.onchange = () => postMessage({ type: 'peers', snapshot: peers.snapshot() })
+
+// the page
+import { servePeerLinks, DEFAULT_ICE_SERVERS } from 'libtorrent-wasm/webtorrent/page'
+
+worker.addEventListener('message', ({ data }) => {
+  if (data.type === 'peer-links') servePeerLinks(data.port, { RTCPeerConnection, iceServers: DEFAULT_ICE_SERVERS })
+})
+```
+
+With a WebRTC stack that runs in the worker, the same signalling drives its class directly:
+
+```js
+import { webtorrentPeers, rtcLinks, DEFAULT_TRACKERS } from 'libtorrent-wasm/webtorrent'
+
+webtorrentPeers(session, {
+  links: rtcLinks({ RTCPeerConnection: StackPeerConnection }),
+  WebSocket: RelayWebSocket,
+  trackers: DEFAULT_TRACKERS,
+  relay: true,
+})
+```
+
+### What it promises
+
+- **It contacts nothing on its own.** No tracker and no STUN host is built in: `trackers` and `iceServers` are the
+  caller's, and both are empty when left out. `DEFAULT_TRACKERS` (`wss://tracker.openwebtorrent.com`,
+  `wss://tracker.webtorrent.dev`) and `DEFAULT_ICE_SERVERS` (`stun:stun.l.google.com:19302`) are constants to
+  pass, or not. Each host that is passed sees the person's IP address, and a tracker also sees which torrents run.
+- **A torrent is announced to its own `ws` and `wss` trackers and to the ones passed.** A private torrent only to
+  its own. A magnet whose private flag is not known yet is not announced to the passed ones until it is.
+- **A tracker name that is the person's own machine or network is never opened**: `localhost`, a name with no dot,
+  `.local`, and loopback, private, shared and link-local addresses. A browser asks permission before such a socket.
+- **Only running torrents.** One that is paused, queued, checking or removed is told `stopped` and its attempts are
+  closed.
+- **An empty swarm costs no connection.** The first announce carries no offer; offers follow the count in the
+  tracker's reply, and a seeding torrent makes none and only answers.
+- **One channel per remote per torrent.** An open channel wins; of an offer of ours and one of theirs that cross,
+  both ends keep the one from the smaller tracker id.
+- **Queues are bounded in both directions**, and `write()` on a stream never throws. A stream sets `backpressure`
+  and no `maxRecvQueue`: how much may sit unread in the engine is `addPeerStream`'s own number.
+- **It keeps looking.** A torrent that found nobody is announced again at the tracker's interval for as long as it
+  runs, and `snapshot()` says what each tracker last answered and when a peer last connected, so an interface can
+  say "no peers yet, still searching" and take it back.
+
+### What it refuses
+
+- Trickle ICE, scrape and TURN: the tracker protocol has no message for the first, the announce reply carries the
+  counts, and there is no relay for the third.
+- A tracker message that does not validate. It is dropped and counted (`snapshot().dropped`) and the socket stays
+  open, since one socket serves every torrent.
+- To tell the worker a remote's address when the connection lives in the page. `links.remoteAddress()` answers
+  only where the WebRTC class is in the worker, which is where `relay: true` needs it.
+- To store anything. Ids, counts and addresses live in memory and go with the session.
+
+### Limits
+
+| what | value |
+| --- | --- |
+| remotes a torrent is connected or connecting to | 20 |
+| the same for a session | 60 |
+| connections open or pending in a session, unanswered offers included | 80 |
+| connections made in a minute | 40 |
+| of each session-wide budget, kept free for the torrent being watched | 10, and 20 when the torrent asking is seeding |
+| offers in one announce | 10, and never more than the tracker lists other peers |
+| an offer nobody answered | closed after 50 s |
+| an answered attempt that has not opened | closed after 30 s |
+| an open channel nothing reads | closed after 10 s |
+| an attempt whose description never comes | given up after 10 s |
+| a remote whose channel closed | not answered for 60 s |
+| after the browser refuses a new connection | nothing is made for 60 s |
+| when a local description is read | gathering complete, or 300 ms after the first reflexive candidate, or 3 s |
+| announce interval | the tracker's, kept within 60 to 600 s; 120 s until it answers |
+| a lost tracker socket | opened again after 10 s, doubling to 10 min, plus up to a quarter |
+| a stream's send queue | stops at 1 MiB, resumes at 256 KiB, in messages of 16 KiB or the remote's limit if smaller |
+| what a stream keeps before anything reads it | 1 MiB |
+| bytes the page has passed to a worker that has not taken them yet | 32 MiB, then the page closes the link |
+| a tracker message | 128 KiB, its SDP 64 KiB |
+
+`limits` overrides the first four.
+
+### What the session has to provide
+
+`webtorrentPeers` takes anything with this shape (`SwarmSession`):
+
+| member | what it is |
+| --- | --- |
+| `addPeerStream(handle, socket)` | hands libtorrent an open stream as a peer; throws, or destroys the stream, when it cannot |
+| `torrents()` | the handle of every torrent |
+| `torrent(handle)` | `{ infoHash, trackers, running, hasMetadata, private, uploaded, downloaded, left, watched }`, or null |
+| `on` / `off` | `add`, `remove`, `pause` and `resume`, each with the handle. Anything else is noticed within a second |
+| `peers(handle)` | only with `relay: true`: the torrent's ordinary peers, by `endpoint` |
+
+`trackers` is `trackersOf(magnet or .torrent bytes)`: libtorrent drops `ws` and `wss` trackers when it parses
+either, so they have to be read from what the torrent was added from.
+
+### What the WebRTC class has to have
+
+`rtcLinks` and `servePeerLinks` use these members of `RTCPeerConnection` and nothing else: the constructor with
+`{ iceServers }`, `createDataChannel`, `createOffer`, `createAnswer`, `setLocalDescription`,
+`setRemoteDescription`, `localDescription.sdp`, `iceGatheringState`, `connectionState`, `close`, the handlers
+`onicecandidate`, `onicegatheringstatechange`, `onconnectionstatechange` and `ondatachannel`, and, where present,
+`sctp.maxMessageSize` and `sctp.transport.iceTransport.getSelectedCandidatePair()`. Of the channel: `binaryType`,
+`readyState`, `bufferedAmount`, `bufferedAmountLowThreshold`, `send`, `close`, and the handlers `onopen`,
+`onmessage`, `onclose`, `onerror` and `onbufferedamountlow`. A class that reports gathering complete as soon as
+its local description is set is read at once.
+
+### Tests
+
+```sh
+npm run vite-build && node --test "tests/webtorrent/*.test.mjs"
+```
+
+They need no wasm and no browser. Most run on in-memory stand-ins. The rest use the reference tracker
+(`bittorrent-tracker`) on a loopback socket and libdatachannel through `node-datachannel`, and skip themselves
+when its native module does not load. Nothing in them reaches a public tracker or a public peer.
 
 ## Building
 
