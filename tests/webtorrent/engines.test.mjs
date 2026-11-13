@@ -11,10 +11,10 @@ import test, { after } from 'node:test'
 
 import { PRIORITY, offlineHost } from '../../build/index.js'
 import { rtcLinks, webtorrentPeers } from '../../build/webtorrent/index.js'
-import { bencode, magnetFor } from '../rig/make-torrent.mjs'
+import { bencode, magnetFor, makeTorrent } from '../rig/make-torrent.mjs'
 import { waitFor } from '../rig/peer-handshake.mjs'
 import { MiB, fixture, savedSha256, startEngine, teardown, tempDir } from '../rig/stream-engine.mjs'
-import { TRACKER, download, routedWebSocket, seed, swarmOver } from './engine-swarm.mjs'
+import { TRACKER, download, finished, routedWebSocket, seed, swarmOver } from './engine-swarm.mjs'
 import { fakeRtc, nativeRtc, referenceTracker, releaseNativeRtc } from './fakes.mjs'
 
 after(releaseNativeRtc)
@@ -126,6 +126,66 @@ test('two engines that can reach nothing but each other\'s streams find each oth
 
 test('with a session that takes no stream the same download never starts: the streams are the only way', async (t) => {
   await cutOff(t, fakeRtc())
+})
+
+test('a magnet that names no tracker finds its seed through a tracker the caller passed, and downloads', async (t) => {
+  const defer = teardown(t)
+  const reference = await referenceTracker(t)
+  if (!reference) return t.skip('bittorrent-tracker is not installed')
+  Routed = routedWebSocket(reference.url)
+  const RTCPeerConnection = fakeRtc()
+  const there = fixture(defer, 4 * MiB)
+  const a = await side(defer, path.join(there.root, 'a'), RTCPeerConnection)
+  await seed(a, there, 'there')
+
+  const b = await startEngine(defer, path.join(there.root, 'b'))
+  const peers = webtorrentPeers(b.session, { links: rtcLinks({ RTCPeerConnection, iceServers: [] }), WebSocket: Routed, trackers: [TRACKER] })
+  defer(() => peers.close())
+  const handle = await b.running(b.session.addMagnet(magnetFor(there.meta.infoHash, there.meta.name), '/there'))
+  assert.deepEqual([b.session.webSocketTrackers(handle), b.session.isPrivate(handle)], [[], undefined])
+  // held to its own trackers until its metadata says, it would be announced nowhere and wait for ever
+  await finished(b, handle, 20_000)
+  assert.equal(savedSha256(b, handle), there.sha256)
+  assert.equal(b.session.isPrivate(handle), false)
+  assert.deepEqual(peers.snapshot().torrents[0].trackers.map((tracker) => [tracker.url, tracker.connected, tracker.failure]), [[TRACKER, true, null]])
+})
+
+test('a torrent that is private when it is added, from its file or from resume data, is never announced to a tracker the caller passed', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const marked = makeTorrent({ file: path.join(fx.root, 'fixture.bin'), pieceLength: 256 * 1024, private: true })
+  // a network with nobody on it: what counts is whether a socket is asked for
+  const asked = []
+  class Asked {
+    readyState = 0
+    constructor(url) { asked.push(url) }
+    send() {}
+    close() {}
+  }
+  const b = await startEngine(defer, path.join(fx.root, 'b'))
+  const peers = webtorrentPeers(b.session, { links: rtcLinks({ RTCPeerConnection: fakeRtc(), iceServers: [] }), WebSocket: Asked, trackers: [TRACKER] })
+  defer(() => peers.close())
+  // The engine has nothing to say of a torrent until its add was pumped, and then says all of it at once. The
+  // swarm reads at every turn of the event loop here, so in every state an add passes through.
+  const taken = async (handle) => {
+    const running = b.running(handle)
+    const deadline = performance.now() + 20_000
+    while (!peers.snapshot().torrents.some((torrent) => torrent.handle === handle)) {
+      assert.ok(performance.now() < deadline, 'the swarm never took the torrent')
+      peers.refresh()
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+    await running
+  }
+
+  const handle = b.session.addTorrentFile(marked.torrent, '/dl')
+  await taken(handle)
+  assert.equal(b.session.isPrivate(handle), true)
+  const resume = await b.session.saveResumeData(handle)
+  b.session.removeTorrent(handle)
+  peers.refresh()
+  await taken(b.session.addTorrentWithResume(resume, '/dl'))
+  assert.deepEqual(asked, [])
 })
 
 test('a download whose session reports a check as its metadata arrives keeps the channel that brought it', async (t) => {
