@@ -18,7 +18,9 @@ import { ScriptedPeer } from './rig/scripted-peer.mjs'
 import { MiB, endpoints, fixture, startEngine, startEngineWithBothKinds, teardown } from './rig/stream-engine.mjs'
 import { streamPipe } from './rig/stream-pipe.mjs'
 
-test('peer exchange names an ordinary peer and no stream address, in the first message and a minute later', async (t) => {
+// libtorrent sends the second message a minute after the first, so this one outlasts the 60 s the
+// test scripts give a case.
+test('peer exchange names an ordinary peer and no stream address, in the first message and a minute later', { timeout: 120_000 }, async (t) => {
   const defer = teardown(t)
   const fx = fixture(defer, MiB)
   // a public address by libtorrent's rules, so a message without it would be a fault too
