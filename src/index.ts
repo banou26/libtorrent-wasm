@@ -1306,6 +1306,19 @@ export class Session {
   }
 
   /**
+   * The `ws` and `wss` trackers the torrent names, as written, each once: the ones libtorrent has
+   * no use for, so {@link trackers} never lists them and the engine never contacts them. They are
+   * for a caller that announces to them itself (`libtorrent-wasm/webtorrent`).
+   *
+   * Read from what the torrent was added from, so the list is there when the add returns. Resume
+   * data from {@link saveResumeData} carries it, and a torrent added from that names them again.
+   */
+  webSocketTrackers(handle: number): string[] {
+    const list = this.mod.UTF8ToString(this.mod._lt_torrent_ws_trackers(handle))
+    return list ? list.split('\n') : []
+  }
+
+  /**
    * Whether the torrent's metadata marks it private (BEP 27): its peers are to come from its own
    * trackers and nowhere else. Undefined while the engine has no metadata to ask, which is every
    * magnet until a peer has sent it, and every torrent until its add alert was pumped.

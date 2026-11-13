@@ -44,6 +44,7 @@ export interface LtModule {
   _lt_torrent_infohash(handle: number, out: number): number
   _lt_torrent_infohash_v2(handle: number, out: number): number
   _lt_torrent_private(handle: number): number
+  _lt_torrent_ws_trackers(handle: number): number
 
   _lt_torrent_set_sequential(handle: number, on: number): number
   _lt_torrent_set_flags(handle: number, flags: number, mask: number): number

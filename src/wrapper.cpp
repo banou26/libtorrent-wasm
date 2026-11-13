@@ -46,6 +46,10 @@ extern "C" int __syscall_setsockopt(int /*fd*/, int /*level*/, int /*optname*/,
 #include "libtorrent/piece_block.hpp"
 #include "libtorrent/piece_picker.hpp"
 #include "libtorrent/aux_/utp_stream.hpp"
+#include "libtorrent/aux_/escape_string.hpp"
+#include "libtorrent/bdecode.hpp"
+#include "libtorrent/bencode.hpp"
+#include "libtorrent/string_util.hpp"
 #include <boost/asio/post.hpp>
 
 #include "disk_io.hpp"
@@ -80,8 +84,14 @@ struct session_state {
   // libtorrent getter (torrent_file(), get_piece_priorities()) sync_calls an io_context that only
   // runs when JS ticks, so it would deadlock here: a bounds check has to read this, never the handle.
   std::unordered_map<std::uint32_t, torrent_geometry> geometry;
+  // The ws and wss trackers each torrent names, in its own order. libtorrent takes none from a
+  // magnet or a .torrent (is_valid_tracker_url), so they are kept here for whoever announces to
+  // them, and written to resume data under RESUME_WS_TRACKERS, which libtorrent does not read.
+  std::unordered_map<std::uint32_t, std::vector<std::string>> ws_trackers;
   std::uint32_t next_handle_id = 1;
 };
+
+constexpr char const* RESUME_WS_TRACKERS = "ws-trackers";
 
 session_state* g_session = nullptr;
 
@@ -309,11 +319,67 @@ void drop_stream_peers(lt::add_torrent_params& p) {
   p.banned_peers.erase(std::remove_if(p.banned_peers.begin(), p.banned_peers.end(), stream), p.banned_peers.end());
 }
 
+// What is_valid_tracker_url asks of a url, for the two schemes it leaves out. No control character
+// and no space, so a newline can stand between two of them.
+bool is_ws_tracker(std::string const& url) {
+  if (!lt::string_begins_no_case("ws://", url.c_str()) && !lt::string_begins_no_case("wss://", url.c_str())) return false;
+  return std::none_of(url.begin(), url.end(), [](char const c) {
+    auto const u = static_cast<unsigned char>(c);
+    return u <= 0x20 || u == 0x7f;
+  });
+}
+
+void keep_ws_tracker(std::uint32_t id, lt::string_view url) {
+  std::string u = url.to_string();
+  lt::ltrim(u);
+  if (!is_ws_tracker(u)) return;
+  auto& kept = g_session->ws_trackers[id];
+  if (std::find(kept.begin(), kept.end(), u) == kept.end()) kept.push_back(std::move(u));
+}
+
+// A magnet link's tr and tr.<number> values, split the way parse_magnet_uri splits them. The
+// link has already passed it, so it starts with "magnet:?".
+void keep_magnet_ws_trackers(std::uint32_t id, lt::string_view sv) {
+  sv = sv.substr(8);
+  while (!sv.empty()) {
+    lt::string_view name, value, stripped, number;
+    std::tie(name, sv) = lt::split_string(sv, '=');
+    std::tie(value, sv) = lt::split_string(sv, '&');
+    std::tie(stripped, number) = lt::split_string(name, '.');
+    if (std::all_of(number.begin(), number.end(), [](char const c) { return lt::is_digit(c); })) name = stripped;
+    if (!lt::string_equal_no_case(name, "tr")) continue;
+    lt::error_code ec;
+    std::string const url = lt::unescape_string(value, ec);
+    if (!ec) keep_ws_tracker(id, url);
+  }
+}
+
+// A .torrent's announce and announce-list.
+void keep_torrent_ws_trackers(std::uint32_t id, lt::span<char const> buf) {
+  lt::error_code ec;
+  lt::bdecode_node const torrent = lt::bdecode(buf, ec);
+  if (ec || torrent.type() != lt::bdecode_node::dict_t) return;
+  keep_ws_tracker(id, torrent.dict_find_string_value("announce"));
+  lt::bdecode_node const tiers = torrent.dict_find_list("announce-list");
+  for (int i = 0; tiers && i < tiers.list_size(); ++i) {
+    lt::bdecode_node const tier = tiers.list_at(i);
+    if (tier.type() != lt::bdecode_node::list_t) continue;
+    for (int j = 0; j < tier.list_size(); ++j) keep_ws_tracker(id, tier.list_string_value_at(j));
+  }
+}
+
 void emit_resume_data(lt::save_resume_data_alert* a) {
   std::uint32_t const hid = handle_id_for_hash(a->params.info_hashes.get_best());
   if (hid == 0) return;
   drop_stream_peers(a->params);
-  std::vector<char> const buf = lt::write_resume_data_buf(a->params);
+  lt::entry resume = lt::write_resume_data(a->params);
+  auto const kept = g_session->ws_trackers.find(hid);
+  if (kept != g_session->ws_trackers.end()) {
+    auto& list = resume[RESUME_WS_TRACKERS].list();
+    for (auto const& url : kept->second) list.emplace_back(url);
+  }
+  std::vector<char> buf;
+  lt::bencode(std::back_inserter(buf), resume);
   std::vector<std::uint8_t> p;
   auto u32 = [&](std::uint32_t v){ auto* b = reinterpret_cast<std::uint8_t*>(&v); p.insert(p.end(), b, b + 4); };
   u32(hid);
@@ -716,7 +782,6 @@ LT_API void lt_diag_force_reopen() {
   g_session->ses->reopen_network_sockets({});
 }
 
-#include "libtorrent/string_util.hpp"
 LT_API int lt_diag_parse_interfaces(char const* str) {
   if (!str) return -1;
   std::vector<std::string> errors;
@@ -851,6 +916,7 @@ LT_API int lt_session_add_magnet(char const* magnet, char const* save_path) {
   if (ec) return -2;
   atp.save_path = save_path ? save_path : ".";
   auto const id = id_for_hash(atp.info_hashes.get_best());
+  keep_magnet_ws_trackers(id, magnet);
   g_session->ses->async_add_torrent(std::move(atp));
   return static_cast<int>(id);
 }
@@ -866,6 +932,7 @@ LT_API int lt_session_add_torrent_file(
   atp.ti = std::move(ti);
   atp.save_path = save_path ? save_path : ".";
   auto const id = id_for_hash(atp.ti->info_hashes().get_best());
+  keep_torrent_ws_trackers(id, {reinterpret_cast<char const*>(buf), static_cast<std::ptrdiff_t>(len)});
   g_session->ses->async_add_torrent(std::move(atp));
   return static_cast<int>(id);
 }
@@ -877,6 +944,7 @@ LT_API int lt_session_remove_torrent(std::uint32_t id) {
   g_session->ses->remove_torrent(*h);
   g_session->handles.erase(id);
   g_session->geometry.erase(id);
+  g_session->ws_trackers.erase(id);
   return 0;
 }
 
@@ -889,6 +957,7 @@ LT_API int lt_session_remove_torrent_ex(std::uint32_t id, int delete_files) {
   g_session->ses->remove_torrent(*h, flags);
   g_session->handles.erase(id);
   g_session->geometry.erase(id);
+  g_session->ws_trackers.erase(id);
   return 0;
 }
 
@@ -935,13 +1004,17 @@ LT_API int lt_session_add_torrent_with_resume(
     std::uint8_t const* buf, std::uint32_t len, char const* save_path) {
   if (!g_session || !buf || !len) return -1;
   lt::error_code ec;
-  lt::add_torrent_params atp = lt::read_resume_data(
+  lt::bdecode_node const rd = lt::bdecode(
       {reinterpret_cast<char const*>(buf), static_cast<std::ptrdiff_t>(len)}, ec);
+  if (ec) return -2;
+  lt::add_torrent_params atp = lt::read_resume_data(rd, ec);
   if (ec) return -2;
   if (save_path && *save_path) atp.save_path = save_path;
   atp.flags |= lt::torrent_flags::no_verify_files;
   drop_stream_peers(atp);
   auto const hid = id_for_hash(atp.info_hashes.get_best());
+  lt::bdecode_node const kept = rd.dict_find_list(RESUME_WS_TRACKERS);
+  for (int i = 0; kept && i < kept.list_size(); ++i) keep_ws_tracker(hid, kept.list_string_value_at(i));
   g_session->ses->async_add_torrent(std::move(atp));
   return static_cast<int>(hid);
 }
@@ -1052,6 +1125,20 @@ LT_API int lt_torrent_infohash_v2(std::uint32_t id, char* out) {
   if (!ih.has_v2()) return -1;
   lt::aux::to_hex(ih.v2.to_string(), out);
   return 0;
+}
+
+// The torrent's ws and wss trackers, one a line. The pointer is good until the next call.
+LT_API char const* lt_torrent_ws_trackers(std::uint32_t id) {
+  static std::string out;
+  out.clear();
+  if (!g_session) return out.c_str();
+  auto const kept = g_session->ws_trackers.find(id);
+  if (kept == g_session->ws_trackers.end()) return out.c_str();
+  for (auto const& url : kept->second) {
+    if (!out.empty()) out += '\n';
+    out += url;
+  }
+  return out.c_str();
 }
 
 // 1 when the metadata marks the torrent private (BEP 27), 0 when it does not, -1 while there is no

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import test from 'node:test'
 
-import { magnetFor, makeTorrent } from './rig/make-torrent.mjs'
+import { bdecode, bencode, magnetFor, makeTorrent } from './rig/make-torrent.mjs'
 import { waitFor } from './rig/peer-handshake.mjs'
 import { MiB, fixture, startEngine, teardown } from './rig/stream-engine.mjs'
 
@@ -83,4 +83,56 @@ test('hasStreamWindow() is true from a window that was planned until it is clear
   assert.equal(session.hasStreamWindow(handle), false)
   assert.equal(session.addTorrentFile(fx.meta.torrent, '/dl'), handle)
   assert.equal(session.hasStreamWindow(handle), false, 'a torrent added again kept the window of the one removed')
+})
+
+test('webSocketTrackers() names the ws and wss trackers of a magnet, a .torrent and resume data, each once and no other', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const { session, running } = await startEngine(defer, path.join(fx.root, 'engine'))
+  assert.deepEqual(session.webSocketTrackers(1), [])
+
+  const tr = (name, url) => `&${name}=${encodeURIComponent(url)}`
+  const magnet = session.addMagnet(magnetFor(OTHER_HASH, 'other')
+    + tr('tr', 'udp://tracker.test:6969/announce')
+    + tr('tr', 'wss://tracker.test/announce')
+    + tr('tr.1', 'ws://tracker.test:8000')
+    + tr('tr', 'wss://tracker.test/announce')
+    + tr('tr', 'WSS://UPPER.test')
+    + tr('tr', 'wss://two words.test')
+    + tr('tr', 'wss://a.test\nwss://b.test')
+    + tr('ws', 'https://webseed.test/file')
+    + '&tr=wss%3A%2F%2Fbad%ZZescape.test', '/dl')
+  // from the add itself: nothing was pumped in between
+  assert.deepEqual(session.webSocketTrackers(magnet), ['wss://tracker.test/announce', 'ws://tracker.test:8000', 'WSS://UPPER.test'])
+
+  const torrent = bencode({
+    ...bdecode(fx.meta.torrent),
+    announce: 'wss://first.test',
+    'announce-list': [['http://tracker.test/announce', 'wss://second.test'], 'wss://not-a-tier.test', ['wss://first.test', ' wss://third.test', 7]],
+  })
+  const file = session.addTorrentFile(torrent, '/dl')
+  const named = ['wss://first.test', 'wss://second.test', 'wss://third.test']
+  assert.deepEqual(session.webSocketTrackers(file), named)
+
+  // libtorrent itself holds none of them, which is why they are kept beside it
+  await running(file)
+  assert.deepEqual((await session.trackers(file)).map((tracker) => tracker.url), ['http://tracker.test/announce'])
+
+  // the same torrent named again, with one tracker more
+  assert.equal(session.addMagnet(magnetFor(fx.meta.infoHash, fx.meta.name) + tr('tr', 'wss://fourth.test') + tr('tr', 'wss://second.test'), '/dl'), file)
+  assert.deepEqual(session.webSocketTrackers(file), [...named, 'wss://fourth.test'])
+
+  const resume = Buffer.from(await session.saveResumeData(file))
+  assert.deepEqual(bdecode(resume)['ws-trackers'].map(String), [...named, 'wss://fourth.test'])
+  session.removeTorrent(file)
+  assert.deepEqual(session.webSocketTrackers(file), [])
+
+  // the source is gone by now: a session that never saw the .torrent reads them from the resume data
+  const second = await startEngine(defer, path.join(fx.root, 'second'))
+  const again = second.session.addTorrentWithResume(resume, '/dl')
+  assert.deepEqual(second.session.webSocketTrackers(again), [...named, 'wss://fourth.test'])
+  await second.running(again)
+  assert.deepEqual((await second.session.trackers(again)).map((tracker) => tracker.url), ['http://tracker.test/announce'])
+  const rewritten = bdecode(Buffer.from(await second.session.saveResumeData(again)))
+  assert.deepEqual(rewritten['ws-trackers'].map(String), [...named, 'wss://fourth.test'])
 })
