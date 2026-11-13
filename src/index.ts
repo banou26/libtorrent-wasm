@@ -677,8 +677,13 @@ export class Session {
    */
   torrents(): number[] { return [...this.handles] }
 
-  removeTorrent(handle: number, deleteFiles = false) {
-    this.mod._lt_session_remove_torrent_ex(handle, deleteFiles ? 1 : 0)
+  /**
+   * Remove a torrent, and with `deleteFiles` its files, on the next tick. That holds from the add
+   * that returned the handle, before any alert was pumped, and an add of the same torrent asked for
+   * after it then stands. False when the engine never gave this handle out.
+   */
+  removeTorrent(handle: number, deleteFiles = false): boolean {
+    const removed = this.mod._lt_session_remove_torrent_ex(handle, deleteFiles ? 1 : 0) === 0
     // before the bitfield goes, or a parked read can never be satisfied and never rejected either
     this.failPieceWaiters(new Error(`read: torrent ${handle} was removed`), handle)
     this.handles.delete(handle)
@@ -689,6 +694,7 @@ export class Session {
     this.resumeByHandle.delete(handle)
     this.priosByHandle.delete(handle)
     this.deadlineRefs.delete(handle)
+    return removed
   }
 
   pauseTorrent(handle: number) { this.mod._lt_torrent_pause(handle) }

@@ -126,3 +126,13 @@ test('an add after an early remove stands, where it was asked to: add, remove, a
   assert.equal(path.relative(path.join(fx.root, 'engine'), saved), path.join('moved', fx.meta.name))
   assert.equal(removed(), 1)
 })
+
+test('removeTorrent() says false for a handle the engine never gave out', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const { session } = await startEngine(defer, path.join(fx.root, 'engine'))
+
+  assert.equal(session.removeTorrent(77), false)
+  assert.equal(session.removeTorrent(session.addMagnet('not a magnet')), false)
+  assert.equal(session.removeTorrent(session.addMagnet(magnetFor(OTHER_HASH, 'other'), '/dl')), true)
+})
