@@ -72,13 +72,18 @@ export class ScriptedPeer {
     this.#reqq = reqq
   }
 
-  /** Resolves once the engine's handshake is back and this peer's opening messages are sent. */
+  /**
+   * Resolves once the engine's handshake is back and this peer's opening messages are sent.
+   * Rejects when the socket fails, and when no handshake is back after 20 s: an engine that
+   * closes the connection or never answers says nothing, and a wait on it would never end.
+   */
   connect() {
     return new Promise((resolve, reject) => {
       const given = this.#socket
       const socket = given ?? net.createConnection({ host: '127.0.0.1', port: this.port })
       this.#socket = socket
       socket.on('error', reject)
+      const late = setTimeout(() => reject(new Error('no handshake from the engine within 20 s')), 20_000).unref()
       const open = () => socket.write(Buffer.concat([
         Buffer.from([PROTOCOL.length]),
         Buffer.from(PROTOCOL, 'ascii'),
@@ -97,6 +102,7 @@ export class ScriptedPeer {
           if (buf.length < 68) return
           buf = buf.subarray(68)
           shookHands = true
+          clearTimeout(late)
           socket.write(frame(MSG.extended, Buffer.concat([
             Buffer.from([0]),
             Buffer.from(`d1:md11:lt_donthavei${DONT_HAVE_ID}e12:ut_holepunchi${HOLEPUNCH_ID}e6:ut_pexi${PEX_ID}ee${this.#reqq ? `4:reqqi${this.#reqq}e` : ''}e`),
