@@ -434,10 +434,12 @@ its local description is set is read at once.
 npm run vite-build && node --test "tests/webtorrent/*.test.mjs"
 ```
 
-They need no wasm and no browser, and `npm run test:ci` runs them with the engine's. Most run on in-memory
-stand-ins. The rest use the reference tracker (`bittorrent-tracker`) on a loopback socket and libdatachannel
-through `node-datachannel`, and skip themselves when its native module does not load. Nothing in them reaches a
-public tracker or a public peer.
+They need no browser, and `npm run test:ci` runs them with the engine's. Most run on in-memory stand-ins and
+need no wasm. The rest use the reference tracker (`bittorrent-tracker`) on a loopback socket and libdatachannel
+through `node-datachannel`, and skip themselves when its native module does not load. `engines.test.mjs` is
+the direct mode whole, and the one file that needs the built engine: two sessions on `offlineHost()`, a swarm
+over each, a file moved each way through the reference tracker, and every ask an engine makes of its host
+counted. Nothing in them reaches a public tracker or a public peer.
 
 ## Building
 
