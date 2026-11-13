@@ -892,7 +892,7 @@ test('with the relay flag an address that was an ordinary peer earlier in the se
   assert.equal(JSON.stringify(r.peers.snapshot()).includes('198.51.100'), false, 'what the swarm reports names no address')
 })
 
-test('with the relay flag a channel whose remote closed it while the ordinary peers were read is not handed over', async t => {
+test('with the relay flag a channel whose remote closed it while the ordinary peers were read is not handed over, and its remote is silent like any other', async t => {
   const r = rig(t, { relay: true })
   await r.start(1)
   let answer
@@ -904,6 +904,14 @@ test('with the relay flag a channel whose remote closed it while the ordinary pe
   answer([])
   await settle()
   assert.equal(r.session.streams.length, 0)
+  assert.equal(r.peers.snapshot().torrents[0].silent, 1, 'it ended its channel without a byte')
+
+  r.session.peers = async () => []
+  await advance(t, 61 * SECOND, SECOND)
+  assert.equal(await remote.connect(1), false, 'so its offer is not answered after the 60 s of a closed channel')
+  const again = from(r, '198.51.100.7')
+  await again.connect(1)
+  assert.deepEqual([r.session.streams.length, again.closes], [0, 1], 'and its address is left alone under another id')
 })
 
 test('with the relay flag the ordinary peers of a torrent are read every 10 s, and never without it', async t => {

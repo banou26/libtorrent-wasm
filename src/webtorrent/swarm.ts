@@ -354,6 +354,10 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
 
   const opened = async (conn: Conn, socket: Stream) => {
     const t = conn.torrent
+    // Known before anything is waited for: a stream can end while the ordinary peers are read, or during the
+    // hand-over when the engine's first write meets a channel its remote has already closed, and how it ended
+    // is what tells a silent remote.
+    conn.socket = socket
     const address = conn.address = relay ? links.remoteAddress(conn.link!) : undefined
     if (address) {
       await look(t)
@@ -364,9 +368,6 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       for (const quiet of t.quiet.values()) if (quiet.address === address) return drop(conn)
     }
     if (!conn.remote || !session.torrent(t.handle)?.running) return drop(conn)
-    // Known before the hand-over: a stream can end during it, when the engine's first write meets a channel
-    // its remote has already closed, and how it ended is what tells a silent remote.
-    conn.socket = socket
     try {
       session.addPeerStream(t.handle, socket)
     } catch {
