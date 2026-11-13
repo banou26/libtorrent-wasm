@@ -50,7 +50,7 @@
     "vite-build-dev": "vp build --watch",
     "build": "npm run make-docker && npm run copy-wasm && npm run build:webrtc",
     "build:webrtc": "npm run webrtc-wasm && npm run vite-build && npm run types",
-    "webrtc-wasm": "node webrtc/patch-sctp-proto.mjs && cd webrtc && cargo build --release --locked --target wasm32-wasip1 && cd .. && copyfiles -f webrtc/target/wasm32-wasip1/release/webrtc.wasm build",
+    "webrtc-wasm": "node webrtc/patch-sctp-proto.mjs && cd webrtc && RUSTFLAGS=\"--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=cargo --remap-path-prefix=$PWD=webrtc\" cargo build --release --locked --target wasm32-wasip1 && cd .. && copyfiles -f webrtc/target/wasm32-wasip1/release/webrtc.wasm build",
     "prepublishOnly": "npm run build",
     "types": "tsc",
     "copy-wasm": "copyfiles -u 1 dist/libtorrent.js dist/libtorrent.wasm build",

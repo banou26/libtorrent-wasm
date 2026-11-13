@@ -584,10 +584,12 @@ three runs each (lowest to highest), with other work on the machine (load 2 to
 
 | file | raw | gzip -9 | brotli -q 11 |
 | --- | --- | --- | --- |
-| `build/webrtc.wasm` | 3,143,661 | 1,039,304 | 752,104 |
+| `build/webrtc.wasm` | 3,124,349 | 1,038,975 | 752,403 |
 | `build/webrtc.js` | 29,318 | 9,246 | 8,145 |
 
-**Release profile**, MiB/s with libdatachannel at the default send buffer
+**Release profile**, MiB/s with libdatachannel at the default send buffer. These
+four were built before the build remapped source paths, which took 19,312 bytes
+off the shipped file.
 
 | profile | raw | brotli | to it | from it |
 | --- | --- | --- | --- | --- |
@@ -677,6 +679,10 @@ Each of these was found by getting it wrong.
 - **A peer closing its connection arrives as one event for the connection**, with
   none for its channels: the wrapper closes them. A peer closing only its channel
   does arrive as that channel closing, and the connection stays up.
+- **Rust writes the absolute path of every source file into its panic messages.**
+  Unremapped, the wasm named 152 files under the cargo directory of the machine
+  that built it. `RUSTFLAGS` in the `webrtc-wasm` script remaps them, and a test
+  reads the wasm for any that is left.
 - **A test that proves a limit is a counted loop.** "Send until it throws" never
   ends once the limit is gone, and a loop that never yields is one no test
   timeout stops (`fill()` in `tests/webrtc/rig/local.mjs`).

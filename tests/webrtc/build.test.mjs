@@ -61,6 +61,18 @@ test('the wasm asks its host for the six WASI calls and nothing else', () => {
   )
 })
 
+test('the wasm names no directory of the machine that built it', () => {
+  // A panic message carries the path of its source file. The standard library's start with
+  // /rustc/ and, for its hashbrown, /cargo/registry/, as they were on the machine that built
+  // Rust. The build remaps every other one to start with cargo/ or webrtc/.
+  const paths = readFileSync(new URL('../../build/webrtc.wasm', import.meta.url), 'latin1').match(/(?<![\w.-])\/[\w.+/-]+\.rs/g) ?? []
+  assert.ok(paths.length > 10, `the scan found ${paths.length} source paths, so it proves nothing`)
+  assert.deepEqual(
+    paths.filter((path) => !/^\/(rustc|cargo\/registry)\//.test(path)),
+    [],
+  )
+})
+
 test('the package ships the entry, its types and its wasm, and the entry imports nothing', () => {
   const pkg = JSON.parse(read('package.json'))
   assert.deepEqual(pkg.exports['./webrtc'], { types: './build/webrtc/index.d.ts', import: './build/webrtc.js' })
