@@ -1,6 +1,7 @@
 // Compiled by tests/webrtc/build.test.mjs, never run: code that is given either constructor,
 // the platform's own or this entry's, names one type for it. Both have to fit that type, and
-// what such code does with a connection has to compile against it.
+// what such code does with a connection has to compile against it. And a socket typed as node
+// types its own has to fit the factory.
 import { createWebRTC, type WebRTC } from '../../../../build/webrtc/index'
 
 type PeerConnection = WebRTC['RTCPeerConnection']
@@ -22,3 +23,12 @@ export async function offer(PeerConnection: PeerConnection) {
   await pc.setLocalDescription(await pc.createOffer())
   return pc.localDescription?.sdp
 }
+
+// node's dgram socket and @fkn/lib's are node's EventEmitter, which types `on` and `off` this way
+declare const socket: {
+  send(data: Uint8Array, port: number, address: string, callback?: (error: Error | null) => void): void
+  on(event: string | symbol, listener: (...args: any[]) => void): unknown
+  off(event: string | symbol, listener: (...args: any[]) => void): unknown
+}
+
+export const overAnEmitter = () => createWebRTC({ socket, address: '192.0.2.1', port: 9 })

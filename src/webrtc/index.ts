@@ -15,7 +15,9 @@ export interface DatagramSocket {
   on(event: 'message', listener: (data: Uint8Array, remote: { address: string; port: number }) => void): unknown
   on(event: 'error', listener: (error: Error) => void): unknown
   on(event: 'close', listener: () => void): unknown
-  off(event: 'message' | 'error' | 'close', listener: (...args: never[]) => void): unknown
+  off(event: 'message', listener: (data: Uint8Array, remote: { address: string; port: number }) => void): unknown
+  off(event: 'error', listener: (error: Error) => void): unknown
+  off(event: 'close', listener: () => void): unknown
 }
 
 export interface WebRTCOptions {

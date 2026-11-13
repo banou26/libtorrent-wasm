@@ -102,8 +102,9 @@ test('the wasm names no directory of the machine that built it', () => {
   )
 })
 
-test("the platform's own RTCPeerConnection fits the type of the entry's constructor", () => {
-  // rig/types/either.ts is code that takes either constructor, against the declarations as built
+test("the platform's own RTCPeerConnection and a socket typed as node's fit the entry's types", () => {
+  // rig/types/either.ts is code that takes either constructor and hands the factory such a socket,
+  // against the declarations as built
   const path = (relative) => fileURLToPath(new URL(relative, import.meta.url))
   const { status, stdout, stderr } = spawnSync(path('../../node_modules/.bin/tsc'), ['-p', path('./rig/types')], { encoding: 'utf8' })
   assert.equal(status, 0, stdout + stderr)
