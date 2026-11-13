@@ -546,9 +546,9 @@ Events arrive through `addEventListener` and through the `on` handlers alike.
 - **A second connection between the same two sockets.** Only STUN names the
   connection it belongs to, so two connections whose packets come from one
   address and port cannot be told apart. Measured between two factories: the
-  second stays `connecting`, the first is not disturbed. Browsers and
-  libdatachannel use a port per connection, so it takes two peers that both use
-  this module.
+  second stays `connecting`, the first is not disturbed. Once the first is
+  closed, the next one between them connects. Browsers and libdatachannel use a
+  port per connection, so it takes two peers that both use this module.
 - A connection no peer ever reaches stays `connecting`: close it on a timeout of
   your own.
 
