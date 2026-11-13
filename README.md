@@ -688,6 +688,10 @@ Each of these was found by getting it wrong.
   Unremapped, the wasm named 152 files under the cargo directory of the machine
   that built it. `RUSTFLAGS` in the `webrtc-wasm` script remaps them, and a test
   reads the wasm for any that is left.
+- **tar keeps the times a crate's archive gives its files, which are from 2006**,
+  and cargo builds a crate again only when one of its files is newer than its
+  last build. Unpacked that way, taking the last patch out left the patched wasm
+  in place with exit 0. The script unpacks with `-m`.
 - **A test that proves a limit is a counted loop.** "Send until it throws" never
   ends once the limit is gone, and a loop that never yields is one no test
   timeout stops (`fill()` in `tests/webrtc/rig/local.mjs`).

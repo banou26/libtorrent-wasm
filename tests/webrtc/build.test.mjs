@@ -6,7 +6,10 @@
 // compiler for wasm. The crate depends on str0m with no feature and carries the provider itself.
 
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
 const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8')
@@ -41,6 +44,31 @@ test('sctp-proto is the patched copy, and every other crate is the registry one'
   )
   assert.match(manifest, /^\[patch\.crates-io\]\nsctp-proto = \{ path = "vendor\/sctp-proto" \}$/m)
   assert.match(read('webrtc/patch-sctp-proto.mjs'), /^const CRATE = 'sctp-proto-0\.10\.8'$/m)
+})
+
+test('sctp-proto is unpacked with the time of the unpacking, so cargo builds it again', (t) => {
+  // cargo builds a crate again when a file of it is newer than its last build. The archive's own
+  // times are from 2006: kept, taking the last patch out left the patched wasm in place, exit 0.
+  const [, crate] = read('webrtc/patch-sctp-proto.mjs').match(/^const CRATE = '([^']+)'$/m)
+  const archive = new URL(`../../webrtc/vendor/${crate}.crate`, import.meta.url)
+  assert.ok(existsSync(archive), `webrtc/vendor has no ${crate}.crate: npm run webrtc-wasm leaves it there`)
+  // the script works beside itself: a copy of it, with the archive and no patch
+  const directory = mkdtempSync(join(tmpdir(), 'sctp-proto-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  mkdirSync(join(directory, 'vendor'))
+  cpSync(archive, join(directory, 'vendor', `${crate}.crate`))
+  cpSync(new URL('../../webrtc/patch-sctp-proto.mjs', import.meta.url), join(directory, 'patch-sctp-proto.mjs'))
+  const started = Date.now()
+  execFileSync(process.execPath, [join(directory, 'patch-sctp-proto.mjs')], { stdio: 'ignore' })
+
+  const source = join(directory, 'vendor', 'sctp-proto', 'src')
+  const files = readdirSync(source, { recursive: true }).filter((name) => name.endsWith('.rs'))
+  assert.ok(files.length > 20, `the unpacked crate has ${files.length} source files, so this proves nothing`)
+  // 2 s for file systems that keep whole seconds
+  assert.deepEqual(
+    files.filter((name) => statSync(join(source, name)).mtimeMs < started - 2000),
+    [],
+  )
 })
 
 test('the toolchain file names a release and the wasm target', () => {

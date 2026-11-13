@@ -34,7 +34,9 @@ if (found !== SHA256) {
   throw new Error(`${CRATE}.crate is not the published crate: its SHA-256 is ${found}`)
 }
 rmSync(`${vendor}/sctp-proto`, { recursive: true, force: true })
-execFileSync('tar', ['-xzf', archive, '-C', vendor])
+// -m: every file takes the time of the unpacking. With the archive's own times, from 2006, cargo
+// sees nothing newer than its last build in the files a patch no longer touches, and builds nothing.
+execFileSync('tar', ['-xzmf', archive, '-C', vendor])
 renameSync(`${vendor}/${CRATE}`, `${vendor}/sctp-proto`)
 for (const patch of patches) {
   execFileSync('patch', ['--strip=1', '--silent', '--directory', `${vendor}/sctp-proto`, '--input', patch], { stdio: 'inherit' })
