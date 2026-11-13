@@ -226,6 +226,11 @@ sockets under them, so libtorrent never sees the outage:
 
 - It retries after 250 ms, 1 s, then every 2 s, so a relay that is back is
   found within 2 s. A socket that is back starts this over.
+- A replacement socket counts for nothing until its bind is granted: the fd
+  does not read writable and a send is answered `EAGAIN`. libtorrent's uTP
+  connections wait for a writable fd to resend, so one that is kept resends as
+  the socket comes back, and not on its next timeout, which the outage has
+  backed off to 11.8 s, 21.0 s and 38.2 s after its last acknowledged packet.
 - Each retry asks for the port the socket first held, the one trackers, peer
   exchange and the DHT were given and the one `reachable().port` names. For the
   first minute of an outage (`KEEP_PORT_MS`) it asks for nothing else, since a
@@ -262,6 +267,16 @@ each): a seed behind the relay served the peer that had dialled it again 2.3 to
 2.5 s after the relay, a relay away again 1 s after it came back cost 5.0 to
 5.5 s after its second return, and a relay away 2 s cost 2.2 to 3.4 s with the
 connections kept. One away 60 s or 300 s came back on the same port.
+
+A seed behind the relay, serving a peer that had dialled in, has nothing but
+that resend to come back with. While a replacement socket could be written to
+before its bind, the resend that waited was written into one the relay then
+refused, lost and counted as sent: with the relay away 22 s no byte moved
+within 10 s of its return in 4 of 72 runs, and in the 2 of 25 instrumented
+runs where a datagram went to the last refused replacement; with it away 14 s
+none moved within 5 s in 11 of 12 runs, the next resend being due 21.0 s after
+the drop. Since: 36 of 36 and 12 of 12, 1.8 to 4.0 s after the relay, and no
+datagram to a socket without a port in 24 instrumented runs.
 
 The reset's number decides it when this end sent packets into the outage. The
 remote then takes the FIN of the disconnect only after those packets, and they
