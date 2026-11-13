@@ -48,6 +48,7 @@ extern "C" int __syscall_setsockopt(int /*fd*/, int /*level*/, int /*optname*/,
 #include "libtorrent/piece_picker.hpp"
 #include "libtorrent/aux_/utp_stream.hpp"
 #include "libtorrent/aux_/escape_string.hpp"
+#include "libtorrent/aux_/session_impl.hpp"
 #include "libtorrent/bdecode.hpp"
 #include "libtorrent/bencode.hpp"
 #include "libtorrent/string_util.hpp"
@@ -895,8 +896,11 @@ LT_API void lt_session_pump_alerts() {
     g_pending_alerts.put_u32(static_cast<std::uint32_t>(msg.size()));
     g_pending_alerts.put_bytes(msg.data(), msg.size());
 
-    if (auto* ata = lt::alert_cast<lt::add_torrent_alert>(a))
-      register_handle(ata->handle);
+    // a torrent removed before this pass came round is aborted, and stays out
+    if (auto* ata = lt::alert_cast<lt::add_torrent_alert>(a)) {
+      auto const t = ata->handle.native_handle();
+      if (t && !t->is_aborted()) register_handle(ata->handle);
+    }
   }
 
   // must run AFTER the loop above, so a handle registered from add_torrent_alert resolves by info-hash
@@ -949,29 +953,27 @@ LT_API int lt_session_add_torrent_file(
   return static_cast<int>(id);
 }
 
-LT_API int lt_session_remove_torrent(std::uint32_t id) {
+// -1 only for an id no add gave out. The torrent is found by its info-hash on the io_context, in
+// order behind the adds asked before it, because its handle is registered only by the alert pass
+// and find_torrent from here is a sync_call that would deadlock.
+LT_API int lt_session_remove_torrent_ex(std::uint32_t id, int delete_files) {
   if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h) return -1;
-  g_session->ses->remove_torrent(*h);
+  auto const& ids = g_session->hash_ids;
+  auto const it = std::find_if(ids.begin(), ids.end(), [id](auto const& e) { return e.second == id; });
+  if (it == ids.end()) return -1;
+  lt::info_hash_t const ih(lt::sha1_hash(it->first.data()));
+  lt::remove_flags_t const flags = delete_files ? lt::session_handle::delete_files : lt::remove_flags_t{};
+  boost::asio::post(*g_session->ioc, [ih, flags] {
+    auto const s = g_session->ses->native_handle();
+    s->remove_torrent(s->find_torrent_handle(ih), flags);
+  });
   g_session->handles.erase(id);
   g_session->geometry.erase(id);
   g_session->ws_trackers.erase(id);
   return 0;
 }
 
-LT_API int lt_session_remove_torrent_ex(std::uint32_t id, int delete_files) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h) return -1;
-  lt::remove_flags_t flags = {};
-  if (delete_files) flags = lt::session_handle::delete_files;
-  g_session->ses->remove_torrent(*h, flags);
-  g_session->handles.erase(id);
-  g_session->geometry.erase(id);
-  g_session->ws_trackers.erase(id);
-  return 0;
-}
+LT_API int lt_session_remove_torrent(std::uint32_t id) { return lt_session_remove_torrent_ex(id, 0); }
 
 // order matters: unset auto_managed first or the queue logic auto-resumes it
 LT_API int lt_torrent_pause(std::uint32_t id) {
