@@ -46,7 +46,7 @@ function record({ ours, channel }) {
  */
 async function warmed(t, options, wire) {
   const { local, links } = await star(t, 1, options, wire)
-  const [{ channel, far }] = links
+  const [{ ours, channel, far }] = links
   const moved = Promise.all([receive(far, 8 * MiB), send(channel, 8 * MiB, 16384)])
   await within(moved, 10_000, 'the 8 MiB that open the window did not go over in 10 s')
   await settled(channel, 10_000)
@@ -63,7 +63,7 @@ async function warmed(t, options, wire) {
     if (data[0] === 23) records.push(new DataView(data.buffer, data.byteOffset).getUint32(7))
     sendNow(data, ...rest)
   }
-  return { local, channel, far, handed, records }
+  return { local, ours, channel, far, handed, records }
 }
 
 /** The most datagrams of `handed` within any one millisecond. */
@@ -162,6 +162,19 @@ test('closing the factory in the middle of a burst tells the peer at once, and h
   await told
   await new Promise((resolve) => setTimeout(resolve, 50))
   assert.equal(handed.length, afterClose)
+})
+
+test('a socket whose send throws on what waits fails its connections, and nothing is thrown out of the timer', async (t) => {
+  const { local, ours, channel } = await warmed(t, { sendBufferSize: 4 * MiB })
+  const events = record({ ours, channel })
+  write(channel, 256)
+  await Promise.resolve()
+  // as node's dgram does once it is closed. An error nobody catches fails this test by itself.
+  local.socket.send = () => {
+    throw new Error('not running')
+  }
+  await once(ours, 'connectionstatechange', 2000)
+  assert.deepEqual(events, ['error OperationError: the socket failed: not running', 'close closed', 'failed'])
 })
 
 test('closing a factory with more connections than the bound tells every peer', { timeout: 60_000 }, async (t) => {

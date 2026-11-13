@@ -198,7 +198,8 @@ export class Host {
 
   /** What is held goes out on the next arrival, or on this timer when nothing arrives. */
   #wait() {
-    this.#timer ??= setTimeout(() => {
+    if (this.#timer !== undefined) return
+    this.#timer = setTimeout(() => {
       this.#timer = undefined
       this.#turn()
     }, 1)
@@ -215,7 +216,12 @@ export class Host {
     if (now - this.#turned >= 1) {
       this.#turned = now
       this.#burst = 0
-      for (const datagram of this.#held.splice(0, MAX_BURST)) this.transmit(...datagram)
+      try {
+        for (const datagram of this.#held.splice(0, MAX_BURST)) this.transmit(...datagram)
+      } catch (error) {
+        // no connection's operation is running to catch it: a socket whose send throws has failed
+        this.fail(error as Error)
+      }
     }
     if (this.#held.length) this.#wait()
   }
@@ -296,8 +302,8 @@ export class Host {
     this.socket.off('error', this.fail)
     this.socket.off('close', this.fail)
     // the data that waits never goes out
+    this.#held.length = 0
     for (const connection of this.connections) end(connection)
-    clearTimeout(this.#timer)
   }
 }
 
