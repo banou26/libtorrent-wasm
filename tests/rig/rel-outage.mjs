@@ -5,7 +5,7 @@
 //
 //   node tests/rig/rel-outage.mjs [--mode rebuild|keep|none] [--remote entry|libdatachannel]
 //                                 [--outage MS] [--moved] [--same-port] [--at FRACTION] [--watch MS]
-//                                 [--size MB] [--up KBPS] [--json out.json]
+//                                 [--size MB] [--up KBPS] [--json out.json] [--dir DIR]
 //
 // --mode says what is done with the WebRTC half when its socket ends:
 //   rebuild  the swarm and the factory are closed, and made again on a new socket once the relay gives one
@@ -15,6 +15,8 @@
 //   none     nothing: the factory ends with its socket
 // --remote is the WebRTC seed's stack: this package's entry, or libdatachannel (a port for each connection,
 // as a browser and qBittorrent have). --moved brings the relay back with the ports its sockets held taken.
+// --dir is where the run keeps its files, a directory of its own in the system's temporary one by default.
+// It is removed when the run ends, also when the run is stopped.
 
 import dgram from 'node:dgram'
 import { EventEmitter } from 'node:events'
@@ -50,7 +52,7 @@ const RTC_SEED = '127.0.0.3'
 const REBIND_EVERY_MS = 500
 const wasm = new WebAssembly.Module(fs.readFileSync(new URL('../../build/webrtc.wasm', import.meta.url)))
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-rel-outage-'))
+const root = arg('dir', null) ?? fs.mkdtempSync(path.join(os.tmpdir(), 'lt-rel-outage-'))
 const t0 = performance.now()
 const now = () => Math.round(performance.now() - t0)
 const closing = []
@@ -317,11 +319,16 @@ const main = async () => {
   if (out) fs.writeFileSync(out, JSON.stringify({ summary, samples, binds: relay.binds, alerts: ours.alerts, seedAlerts: utpSeed.alerts }, null, 1))
 }
 
+let finishing = false
 const finish = async (code) => {
+  if (finishing) return
+  finishing = true
   for (const close of closing.reverse()) {
     try { await close() } catch { /* the rest still has to go */ }
   }
   fs.rmSync(root, { recursive: true, force: true })
   process.exit(code)
 }
+process.once('SIGTERM', () => void finish(143))
+process.once('SIGINT', () => void finish(130))
 main().then(() => finish(0), (error) => { console.error(error); return finish(1) })
