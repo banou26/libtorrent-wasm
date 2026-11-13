@@ -4,12 +4,14 @@
 
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
-import test from 'node:test'
+import test, { after } from 'node:test'
 
 import { rtcLinks, webtorrentPeers } from '../../build/webtorrent/index.js'
 import {
-  eventually, fakeRtc, fakeWebSocket, FakeSession, nativeRtc, referenceTracker, TestTracker, writeAll,
+  eventually, fakeRtc, fakeWebSocket, FakeSession, nativeRtc, referenceTracker, releaseNativeRtc, TestTracker, writeAll,
 } from './fakes.mjs'
+
+after(releaseNativeRtc)
 
 const TRACKER = 'wss://tracker.test/'
 const HANDLE = 1

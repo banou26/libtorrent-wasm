@@ -611,3 +611,16 @@ export const referenceTracker = async t => {
 
 /** libdatachannel's RTCPeerConnection and its companions, or null when the native module does not load here. */
 export const nativeRtc = await import('node-datachannel/polyfill').catch(() => null)
+
+// node-datachannel 0.32.3 keeps the event loop until each channel's closed callback has run, and that
+// callback is lost when a connection is closed and its channel right behind it from this thread, which is what
+// the polyfill makes of a channel closed first (it closes the channel a task later). 260 of 640 channels
+// closed that way never heard it, the 3 processes holding such a channel never ended, and the 8 that then
+// called cleanup() ended, in 1 to 9 ms (2026-11-13).
+/**
+ * For a file whose cases made connections with `nativeRtc`, once they are done: frees what the native module
+ * still holds, so that the file's process can end.
+ */
+export const releaseNativeRtc = async () => {
+  if (nativeRtc) (await import('node-datachannel')).cleanup()
+}

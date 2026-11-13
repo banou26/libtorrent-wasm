@@ -2,11 +2,17 @@
 // (always) and against libdatachannel through node-datachannel (when its native module loads).
 
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
-import test from 'node:test'
+import test, { after } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { LinksFull, rtcLinks } from '../../build/webtorrent/index.js'
-import { advance, fakeRtc, handlersOf, pair, reached, reading, settle, turn, until, within, writeAll } from './fakes.mjs'
+import {
+  advance, fakeRtc, handlersOf, nativeRtc, pair, reached, reading, releaseNativeRtc, settle, turn, until, within, writeAll,
+} from './fakes.mjs'
+
+after(releaseNativeRtc)
 
 const KIB = 1024
 const MIB = 1024 * KIB
@@ -439,10 +445,8 @@ test('the ICE servers reach the class as they were given, and none are added', a
   ])
 })
 
-const native = await import('node-datachannel/polyfill').then(module => module.RTCPeerConnection, () => null)
-
-test('libdatachannel: both ends open, 2 MiB cross each way intact, early bytes are kept, close reaches the remote', { skip: !native && 'node-datachannel did not load' }, async () => {
-  const links = rtcLinks({ RTCPeerConnection: native, iceServers: [] })
+test('libdatachannel: both ends open, 2 MiB cross each way intact, early bytes are kept, close reaches the remote', { skip: !nativeRtc && 'node-datachannel did not load' }, async () => {
+  const links = rtcLinks({ RTCPeerConnection: nativeRtc.RTCPeerConnection, iceServers: [] })
   const started = Date.now()
   const offer = await links.offer()
   const answer = await links.answer(offer.sdp)
@@ -481,4 +485,27 @@ test('libdatachannel: both ends open, 2 MiB cross each way intact, early bytes a
   while (b.closes === 0 && Date.now() < until2) await new Promise(resolve => setTimeout(resolve, 20))
   assert.equal(b.closes, 1)
   assert.equal(a.closes, 0)
+})
+
+test('libdatachannel: a process the native module would keep alive for good ends by itself once releaseNativeRtc has run', { skip: !nativeRtc && 'node-datachannel did not load' }, async () => {
+  /** How one run of native-held.mjs ended. It is ended here `ms` after it said done, or 30 s after it started. */
+  const ending = (mode, ms) => new Promise(resolve => {
+    const fixture = fileURLToPath(new URL('./native-held.mjs', import.meta.url))
+    const child = spawn(process.execPath, [fixture, mode], { stdio: ['ignore', 'pipe', 'inherit'] })
+    const stop = () => child.kill('SIGKILL')
+    let done = false
+    let timer = setTimeout(stop, 30_000)
+    child.stdout.once('data', () => {
+      done = true
+      clearTimeout(timer)
+      timer = setTimeout(stop, ms)
+    })
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer)
+      resolve(`${done ? 'done' : 'not done'}, ${signal ? 'ended here' : `ended by itself with code ${code}`}`)
+    })
+  })
+  const [released, held] = await Promise.all([ending('release', 10_000), ending('hold', 2000)])
+  assert.equal(held, 'done, ended here', 'the control: without the release the same process is still there 2 s after it was done')
+  assert.equal(released, 'done, ended by itself with code 0')
 })

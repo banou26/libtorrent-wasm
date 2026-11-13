@@ -5,10 +5,12 @@
 
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
-import test from 'node:test'
+import test, { after } from 'node:test'
 
 import { rtcLinks, Tracker, webtorrentPeers } from '../../build/webtorrent/index.js'
-import { binary, eventually, FakeSession, hashOf, nativeRtc, referenceTracker } from './fakes.mjs'
+import { binary, eventually, FakeSession, hashOf, nativeRtc, referenceTracker, releaseNativeRtc } from './fakes.mjs'
+
+after(releaseNativeRtc)
 
 const HASH = hashOf(1)
 const PEER_A = '-RP0001-aaaaaaaaaaaa'
