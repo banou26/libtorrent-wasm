@@ -631,6 +631,24 @@ test('a remote whose channel closed is not answered for 60 s', async t => {
   assert.equal(await remote.connect(1), true)
 })
 
+// Two of ours whose offers cross each see the other close its losing attempt. Were the answer that follows
+// refused as well, they would end with no channel.
+test('a remote left alone for those 60 s still has its answer to an offer of ours taken', async t => {
+  const r = rig(t)
+  r.tracker.phantoms = { complete: 1, incomplete: 0 }
+  await r.start(1)
+  const remote = new Remote(r)
+  assert.equal(await remote.connect(1), true)
+  remote.sockets[0].write(Buffer.of(19))
+  await settle()
+  remote.sockets[0].destroy()
+  await settle()
+  assert.equal(await remote.connect(1), false, 'its offer is not answered')
+  await remote.answer(1, r.offered(1)[0].offers[0])
+  assert.equal(r.session.streams.length, 2, 'its answer is taken')
+  assert.equal(r.peers.snapshot().torrents[0].silent, 0)
+})
+
 /** The engine gives a stream up, as libtorrent does one whose remote never sent its handshake. */
 const giveUp = async stream => {
   stream.socket.destroy()
