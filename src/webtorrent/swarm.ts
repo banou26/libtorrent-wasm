@@ -51,7 +51,8 @@ const viewOf = (session: SwarmSession, handle: number): View | null => {
     // what libtorrent itself tells a tracker: the payload of this session
     uploaded: status.sessionPayloadUpload,
     downloaded: status.sessionPayloadDownload,
-    left: status.totalWanted - status.totalDone,
+    // not `totalDone`, which also counts a file that is held and skipped
+    left: status.totalWanted - status.totalWantedDone,
     watched: session.hasStreamWindow(handle),
   }
 }

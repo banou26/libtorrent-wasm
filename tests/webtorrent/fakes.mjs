@@ -510,7 +510,7 @@ export class FakeSession {
     if (!view || view.status === null) return null
     return {
       state: view.hasMetadata ? 3 : 2, paused: !view.running, errorCode: 0, hasMetadata: view.hasMetadata,
-      totalWanted: view.left, totalDone: 0, sessionPayloadUpload: view.uploaded, sessionPayloadDownload: view.downloaded,
+      totalWanted: view.left, totalWantedDone: 0, sessionPayloadUpload: view.uploaded, sessionPayloadDownload: view.downloaded,
       ...view.status,
     }
   }

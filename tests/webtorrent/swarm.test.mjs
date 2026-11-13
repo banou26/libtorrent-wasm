@@ -1188,9 +1188,17 @@ test('a torrent that checks while it runs keeps its channel and its place at the
 
 test('a tracker is told the bytes still wanted and the payload of this session, as the engine counts them', async t => {
   const r = rig(t)
-  await r.start(1, { status: { totalWanted: 5000, totalDone: 1200, sessionPayloadUpload: 70, sessionPayloadDownload: 90, allTimeUpload: 7000, allTimeDownload: 9000 } })
+  await r.start(1, { status: { totalWanted: 5000, totalWantedDone: 1200, sessionPayloadUpload: 70, sessionPayloadDownload: 90, allTimeUpload: 7000, allTimeDownload: 9000 } })
   const { left, uploaded, downloaded } = r.tracker.announces(hashOf(1))[0]
   assert.deepEqual({ left, uploaded, downloaded }, { left: 3800, uploaded: 70, downloaded: 90 })
+})
+
+test('a torrent that holds a file it skips, larger than what it still wants, is a download: it says what is left and offers', async t => {
+  const r = rig(t)
+  r.tracker.phantoms = { complete: 1, incomplete: 0 }
+  await r.start(1, { status: { totalWanted: 1000, totalWantedDone: 0, totalDone: 2000 } })
+  assert.equal(r.tracker.announces(hashOf(1))[0].left, 1000)
+  assert.equal(r.offered(1)[0]?.offers.length, 1, 'a torrent with bytes still to come made no offer')
 })
 
 test('a torrent the session lists and has no status or hash for yet waits until it has both', async t => {

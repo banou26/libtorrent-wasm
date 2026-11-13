@@ -4,11 +4,12 @@
 // every ask they make of their host is counted.
 
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import test, { after } from 'node:test'
 
-import { TORRENT_STATE, offlineHost } from '../../build/index.js'
+import { PRIORITY, TORRENT_STATE, offlineHost } from '../../build/index.js'
 import { rtcLinks, webtorrentPeers } from '../../build/webtorrent/index.js'
 import { bdecode, bencode, magnetFor } from '../rig/make-torrent.mjs'
 import { waitFor } from '../rig/peer-handshake.mjs'
@@ -213,6 +214,53 @@ test('a download whose session reports a check as its metadata arrives keeps the
   const { handle } = await download(b, there, 'there', 20_000)
   assert.equal(savedSha256(b, handle), there.sha256)
   assert.deepEqual(b.handed, [handle], 'the download took more than the one stream it began on')
+})
+
+test('a torrent that holds a file it skips, larger than what it still wants, finds the seed and gets the rest', async (t) => {
+  const defer = teardown(t)
+  const reference = await referenceTracker(t)
+  if (!reference) return t.skip('bittorrent-tracker is not installed')
+  Routed = routedWebSocket(reference.url)
+  const RTCPeerConnection = fakeRtc()
+  const root = tempDir(defer)
+  const pieceLength = 256 * 1024
+  const files = [{ name: 'held.bin', bytes: crypto.randomBytes(2 * MiB) }, { name: 'wanted.bin', bytes: crypto.randomBytes(MiB) }]
+  const all = Buffer.concat(files.map((file) => file.bytes))
+  const pieces = []
+  for (let at = 0; at < all.length; at += pieceLength) pieces.push(crypto.createHash('sha1').update(all.subarray(at, at + pieceLength)).digest())
+  const torrent = bencode({
+    announce: TRACKER,
+    info: { files: files.map((file) => ({ length: file.bytes.length, path: [file.name] })), name: 'pack', 'piece length': pieceLength, pieces: Buffer.concat(pieces) },
+  })
+  /** The pack on an engine that has `held` of its files on disk already. */
+  const holding = async (engine, held) => {
+    fs.mkdirSync(path.join(engine.dir, 'dl', 'pack'), { recursive: true })
+    for (const file of held) fs.writeFileSync(path.join(engine.dir, 'dl', 'pack', file.name), file.bytes)
+    const handle = await engine.running(engine.session.addTorrentFile(torrent, '/dl'))
+    const bytes = held.reduce((sum, file) => sum + file.bytes.length, 0)
+    await waitFor('the files on disk to be counted', () => engine.session.status(handle)?.totalDone === bytes)
+    return handle
+  }
+
+  const a = await side(defer, path.join(root, 'a'), RTCPeerConnection)
+  const seeded = await holding(a, files)
+  await waitFor('the tracker to list the seed', () => a.of(seeded)?.trackers[0]?.seeders === 1)
+
+  // ripple's ordinary torrent: a pack with one file watched earlier and skipped now, and another wanted
+  const b = await startEngine(defer, path.join(root, 'b'))
+  const handle = await holding(b, files.slice(0, 1))
+  b.session.setFilePriorities(handle, Uint8Array.from([PRIORITY.skip, PRIORITY.normal]))
+  await waitFor('the skip to show', () => b.session.status(handle)?.totalWanted === MiB)
+  // all it holds is more than all it wants, and none of it is wanted
+  const { totalDone, totalWantedDone } = b.session.status(handle)
+  assert.deepEqual({ totalDone, totalWantedDone }, { totalDone: 2 * MiB, totalWantedDone: 0 })
+
+  const peers = webtorrentPeers(b.session, { links: rtcLinks({ RTCPeerConnection, iceServers: [] }), WebSocket: Routed })
+  defer(() => peers.close())
+  // a swarm that read it as a seed made no offer, and the seed makes none either
+  await waitFor('the wanted file', () => b.session.status(handle)?.numPiecesHave === pieces.length, 20_000)
+  const saved = fs.readFileSync(b.storage.filePath(b.session.files(handle).storageIndex, 1))
+  assert.ok(saved.equals(files[1].bytes), 'the file that arrived is not the one the seed holds')
 })
 
 test('libdatachannel: the same two engines over real ICE, DTLS and SCTP on this machine', { skip: !nativeRtc && 'node-datachannel did not load' }, async (t) => {
