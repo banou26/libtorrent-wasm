@@ -268,13 +268,36 @@ webtorrentPeers(session, {
   closed.
 - **An empty swarm costs no connection.** The first announce carries no offer; offers follow the count in the
   tracker's reply, and a seeding torrent makes none and only answers.
-- **One channel per remote per torrent.** An open channel wins; of an offer of ours and one of theirs that cross,
-  both ends keep the one from the smaller tracker id.
+- **The first seconds wait for nothing.** The offers go out as soon as the first reply names somebody and their
+  descriptions are read, and an offer that arrives while there is room is answered as soon as ours is read: no
+  interval and no timer of the swarm's sits in between. In a swarm of libtorrent 2.1 peers (qBittorrent) the
+  first batch is most of what a session gets, since the first one that connects passes our address on and the
+  others then stay silent.
+- **One channel per remote per torrent.** A remote is the peer id of its tracker messages, which for a libtorrent
+  2.1 peer is never the id in its BitTorrent handshake, so the two are never compared. An open channel wins: an
+  offer or an answer that arrives from its remote opens nothing beside it. Of an offer of ours and one of theirs
+  that cross, both ends keep the one from the smaller tracker id. The attempt that loses is closed at our end
+  every time, since a libtorrent 2.1 peer never closes its own.
+- **A remote that stays silent is left alone.** When the engine ends a stream it read and that never delivered a
+  byte (libtorrent's handshake timeout, 10.4 to 12.7 s after the channel opened), the remote's offers are not
+  answered and its answers not taken for 10 minutes, and with `relay` no channel from its address is taken
+  either. That is how a libtorrent 2.1 peer that will not talk to this address looks: it opens the channel, says
+  nothing and never closes it. A remote that sent one byte is never counted so. `snapshot()` counts these remotes
+  per torrent (`silent`), so an interface can tell peers that refuse this address from nobody being there.
+- **Its ids have the shape a libtorrent 2.1 peer reads.** The peer id and every offer id are exactly 20 bytes,
+  each sent as a JSON string of one character for each byte. One message of another shape makes a 2.1.1 peer
+  drop its tracker socket for up to a minute.
+- **A connection is closed 5 ms after its last signalling step, or later**, however its link ended; its channel
+  is closed at once. Chromium keeps one of the page's 500 slots for a connection closed sooner, until the frame
+  is gone. The wait is a timer in the thread the connection lives in, and it is the page half's only timer.
+- **A connection the WebRTC class will not make is no error.** It means there is no slot now: the attempt ends,
+  `snapshot().unmade` counts it, nothing more is asked of the class until the next announce goes out, and that
+  announce tries again.
 - **Queues are bounded in both directions**, and `write()` on a stream never throws. A stream sets `backpressure`
   and no `maxRecvQueue`: how much may sit unread in the engine is `addPeerStream`'s own number.
 - **It keeps looking.** A torrent that found nobody is announced again at the tracker's interval for as long as it
-  runs, and `snapshot()` says what each tracker last answered and when a peer last connected, so an interface can
-  say "no peers yet, still searching" and take it back.
+  runs, and `snapshot()` says what each tracker last answered, when a peer last connected and how many remotes
+  stayed silent, so an interface can say "no peers yet, still searching" and take it back.
 
 ### What it refuses
 
@@ -284,7 +307,9 @@ webtorrentPeers(session, {
   open, since one socket serves every torrent.
 - To tell the worker a remote's address when the connection lives in the page. `links.remoteAddress()` answers
   only where the WebRTC class is in the worker, which is where `relay: true` needs it.
-- To store anything. Ids, counts and addresses live in memory and go with the session.
+- To store anything. Ids, counts and addresses live in memory and go with the session, and `snapshot()` names
+  no address. With `relay` that includes where a torrent's ordinary peers are or were, which is read from
+  `session.peers` and compared with the address a channel comes from, nothing else.
 
 ### Limits
 
@@ -301,7 +326,13 @@ webtorrentPeers(session, {
 | an open channel nothing reads | closed after 10 s |
 | an attempt whose description never comes | given up after 10 s |
 | a remote whose channel closed | not answered for 60 s |
-| after the browser refuses a new connection | nothing is made for 60 s |
+| a remote whose stream the engine ended before it had sent a byte | not answered, and its answers not taken, for 10 min |
+| remotes a torrent leaves alone at one time | 200, then the oldest is forgotten |
+| with `relay`, a channel whose remote address is or was an ordinary peer of the torrent in this session | closed |
+| with `relay`, the addresses of ordinary peers a torrent remembers | 1000, then the oldest is forgotten; read every 10 s and when a channel opens |
+| after the WebRTC class refuses a new connection | nothing is made until the next announce |
+| when a connection is closed | 5 ms after its last signalling step, or later |
+| our peer id, and each offer id | exactly 20 bytes |
 | when a local description is read | gathering complete, or 300 ms after the first reflexive candidate, or 3 s |
 | announce interval | the tracker's, kept within 60 to 600 s; 120 s until it answers |
 | a lost tracker socket | opened again after 10 s, doubling to 10 min, plus up to a quarter |
@@ -318,11 +349,11 @@ webtorrentPeers(session, {
 
 | member | what it is |
 | --- | --- |
-| `addPeerStream(handle, socket)` | hands libtorrent an open stream as a peer; throws, or destroys the stream, when it cannot |
+| `addPeerStream(handle, socket)` | hands libtorrent an open stream as a peer; throws, or destroys the stream, when it cannot. When libtorrent gives a peer up it destroys the stream: one it had read and that never delivered a byte marks its remote silent |
 | `torrents()` | the handle of every torrent |
 | `torrent(handle)` | `{ infoHash, trackers, running, hasMetadata, private, uploaded, downloaded, left, watched }`, or null |
 | `on` / `off` | `add`, `remove`, `pause` and `resume`, each with the handle. Anything else is noticed within a second |
-| `peers(handle)` | only with `relay: true`: the torrent's ordinary peers, by `endpoint` |
+| `peers(handle)` | only with `relay: true`: the torrent's ordinary peers, by `endpoint`. Asked every 10 s for each running torrent, and when a channel opens |
 
 `trackers` is `trackersOf(magnet or .torrent bytes)`: libtorrent drops `ws` and `wss` trackers when it parses
 either, so they have to be read from what the torrent was added from.
@@ -344,9 +375,10 @@ its local description is set is read at once.
 npm run vite-build && node --test "tests/webtorrent/*.test.mjs"
 ```
 
-They need no wasm and no browser. Most run on in-memory stand-ins. The rest use the reference tracker
-(`bittorrent-tracker`) on a loopback socket and libdatachannel through `node-datachannel`, and skip themselves
-when its native module does not load. Nothing in them reaches a public tracker or a public peer.
+They need no wasm and no browser, and `npm run test:ci` runs them with the engine's. Most run on in-memory
+stand-ins. The rest use the reference tracker (`bittorrent-tracker`) on a loopback socket and libdatachannel
+through `node-datachannel`, and skip themselves when its native module does not load. Nothing in them reaches a
+public tracker or a public peer.
 
 ## Building
 
