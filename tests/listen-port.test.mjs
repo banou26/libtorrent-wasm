@@ -164,7 +164,7 @@ const makeNet = () => {
       srv.closed = false
       srv.listen = (port, address) => { srv.listenCalls.push({ port, address }); srv.emit('listening') }
       srv.close = () => { srv.closed = true }
-      srv.address = () => ({ address: '0.0.0.0', port: srv.listenCalls[0]?.port ?? 0, family: 'IPv4' })
+      srv.address = () => ({ address: '0.0.0.0', port: srv.listenCalls[0]?.port || PORT, family: 'IPv4' })
       servers.push(srv)
       return srv
     },
@@ -369,34 +369,6 @@ test('with no reservation the relay is asked for an ephemeral port, not the plac
   st.closed = true
 })
 
-/**
- * Keeping the port across a reopen is worth one try, since peers learned it from implied_port. But
- * a named bind is a real bind now, and the socket just closed may not have been released yet, so
- * after one refusal take anything rather than lose the socket entirely.
- */
-test('a reopen keeps the port once, then takes whatever is free', async () => {
-  const dgram = makeDgram(PORT)
-  const net = makeNet()
-  const { FKN } = loadShim({ net, dgram, storage: null })
-
-  const st = { kind: 'udp', family: 'IPv4', nonblock: false, socket: null, udpRecv: [], reopenAttempts: 0 }
-  FKN._dbgWorkerUdpPkts = 0; FKN._dbgWorkerUdpBytes = 0
-  FKN._dbgJsBusyUs = 0; FKN._dbgJsHandlerCalls = 0
-  FKN.attachUdp(st)
-  st.localAddr = '0.0.0.0'; st.localPort = PORT; st.localFamily = 'IPv4'; st.bound = true
-
-  st.socket.emit('close')
-  await new Promise((resolve) => setTimeout(resolve, 350))
-  assert.deepEqual(dgram.sockets[1].bindCalls, [{ port: PORT, address: '0.0.0.0' }],
-    'the first reopen gave up the port peers already know')
-
-  st.socket.emit('close')
-  await new Promise((resolve) => setTimeout(resolve, 1100))
-  assert.deepEqual(dgram.sockets[2].bindCalls, [{ port: 0, address: '0.0.0.0' }],
-    'kept asking for a port the relay had already refused')
-  st.closed = true
-})
-
 // ------------------------------------------------------- naming the peer that dialled in
 
 /**
@@ -540,49 +512,88 @@ test('a stale acceptor cannot feed the fd that replaced it', async () => {
   st.closed = true
 })
 
-test('a listener that cannot reclaim its port eventually takes any port', async () => {
-  const dgram = makeDgram(PORT)
-  // a relay that refuses the named port and grants only ephemeral ones, which is what a port still
-  // held by the socket we just dropped looks like from here
-  const servers = []
-  const net = {
-    servers,
-    createServer() {
-      const srv = new EventEmitter()
-      srv.listenCalls = []
-      srv.listen = (port, address) => {
-        srv.listenCalls.push({ port, address })
-        setImmediate(() => {
-          if (port !== 0) srv.emit('error', Object.assign(new Error('Address already in use'), { errno: 29 }))
-          else { srv.granted = 45678; srv.emit('listening') }
-        })
-      }
-      srv.close = () => {}
-      srv.address = () => ({ address: '0.0.0.0', port: srv.granted ?? PORT, family: 'IPv4' })
-      servers.push(srv)
-      return srv
-    },
+/**
+ * A relay that grants a listen on a free port on a later turn, refuses one while it is `away` or on a
+ * port in `taken`, and draws a new number for each listen(0).
+ */
+const makeRelayNet = () => {
+  const relay = { away: false, taken: new Set(), listens: [], servers: [], nextEphemeral: 45678 }
+  relay.createServer = () => {
+    const srv = new EventEmitter()
+    srv.listen = (port) => {
+      relay.listens.push({ at: Date.now(), port })
+      setTimeout(() => {
+        if (relay.away || relay.taken.has(port)) { srv.emit('error', new Error('refused')); return }
+        srv.granted = port || relay.nextEphemeral++
+        srv.emit('listening')
+      }, 30)
+    }
+    srv.close = () => {}
+    srv.address = () => srv.granted == null ? null : { address: '0.0.0.0', port: srv.granted, family: 'IPv4' }
+    relay.servers.push(srv)
+    return srv
   }
-  const { FKN, library } = loadShim({ net, dgram, storage: null })
+  return relay
+}
+
+// in steps, because a mocked tick runs only the timers due when it started: one set by a timer that
+// fired during it waits for the next tick
+const STEP = 10
+const advance = (t, ms) => { for (let i = 0; i < ms / STEP; i++) t.mock.timers.tick(STEP) }
+
+const relayListenFd = (t, net) => {
+  const { FKN, library } = loadShim({ net, dgram: makeDgram(PORT), storage: null })
   const st = { kind: 'tcp-unbound', family: 'IPv4', nonblock: false, pendingBindPort: PORT, pendingBindAddr: '0.0.0.0' }
-  const fd = FKN.newFd(st)
-  library.$FKN_listen(fd)
-  // the fake answers 'listening' on a later turn, exactly as a real relay does
-  await new Promise((resolve) => setTimeout(resolve, 20))
+  library.$FKN_listen(FKN.newFd(st))
+  t.mock.timers.tick(30)
+  t.after(() => { st.closed = true })
+  return { FKN, st, drop: () => net.servers.at(-1).emit('close') }
+}
 
-  // the initial listen asks for 0 and is granted 45678, so THAT is the number peers learn and the
-  // one a reopen has to try to reclaim
-  assert.equal(st.localPort, 45678, 'the fd did not adopt the granted port')
+test('a listener whose relay is back after 20 s is listening again within 2 s, on its port', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
+  const net = makeRelayNet()
+  const { st, drop } = relayListenFd(t, net)
+  const home = st.localPort
+  assert.equal(home, 45678)
 
-  servers[0].emit('close')
-  // 250ms then 1000ms both retry the held number and are refused; the third waits 3000ms and takes any
-  await new Promise((resolve) => setTimeout(resolve, 5200))
+  net.away = true
+  const from = net.listens.length
+  drop()
+  advance(t, 20_000)
+  net.away = false
+  const back = Date.now()
+  for (let i = 0; i < 250 && !st.listening; i++) t.mock.timers.tick(STEP)
+  assert.ok(st.listening, 'the listener was not back 2.5 s after the relay')
+  const asked = net.listens.slice(from)
+  assert.ok(asked.at(-1).at - back <= 2000 + 30 + 2 * STEP, `found ${asked.at(-1).at - back} ms after the relay was back`)
+  assert.deepEqual([...new Set(asked.map((l) => l.port))], [home], 'a reopen gave up the port peers know')
+  assert.equal(st.localPort, home)
+})
 
-  const reclaims = servers.filter((s) => s.listenCalls.some((c) => c.port === 45678))
-  const ephemeral = servers.slice(1).filter((s) => s.listenCalls.some((c) => c.port === 0))
-  assert.ok(reclaims.length >= 1, 'never tried to reclaim the published port; calls=' + JSON.stringify(servers.map(x => x.listenCalls)))
-  assert.ok(ephemeral.length >= 1, 'kept asking for a port the relay had already refused; calls=' + JSON.stringify(servers.map(x => x.listenCalls)))
-  st.closed = true
+test('a listener whose port somebody took gives it up after KEEP_PORT_MS, and asks for it again next time', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
+  const net = makeRelayNet()
+  const { FKN, st, drop } = relayListenFd(t, net)
+  const home = st.localPort
+
+  net.taken.add(home)
+  const from = net.listens.length
+  const lost = Date.now()
+  drop()
+  for (let i = 0; i < 7000 && !st.listening; i++) t.mock.timers.tick(STEP)
+  const asked = net.listens.slice(from)
+  const moved = asked.findIndex((l) => l.port === 0)
+  assert.ok(moved > 0, 'never took another port')
+  assert.ok(asked.slice(0, moved).every((l) => l.port === home && l.at - lost < FKN.KEEP_PORT_MS), 'gave up the port too early')
+  assert.ok(asked[moved].at - lost >= FKN.KEEP_PORT_MS && asked[moved].at - lost <= FKN.KEEP_PORT_MS + 2000 + 30 + 2 * STEP)
+  assert.notEqual(st.localPort, home)
+
+  net.taken.clear()
+  drop()
+  for (let i = 0; i < 250 && !st.listening; i++) t.mock.timers.tick(STEP)
+  assert.equal(net.listens.at(-1).port, home, 'the next outage did not ask for the published port')
+  assert.equal(st.localPort, home)
 })
 
 // ------------------------------------------------ what is actually bound, right now
@@ -680,6 +691,8 @@ test('an acceptor that healed onto another port reports the port it really holds
     },
   }
   const { FKN, library } = loadShim({ net, dgram, storage: null })
+  // the move made on the first reopen; when a reopen moves is the test above
+  FKN.KEEP_PORT_MS = 0
   const st = { kind: 'tcp-unbound', family: 'IPv4', nonblock: false, pendingBindPort: PORT, pendingBindAddr: '0.0.0.0' }
   FKN.newFd(st)
   library.$FKN_listen(FKN.fds.keys().next().value)
@@ -687,7 +700,7 @@ test('an acceptor that healed onto another port reports the port it really holds
   assert.equal(FKN.listeners()[0].port, 45678)
 
   servers[0].emit('close')
-  await new Promise((resolve) => setTimeout(resolve, 5200))
+  await new Promise((resolve) => setTimeout(resolve, 400))
 
   const healed = FKN.listeners()[0]
   assert.equal(healed.up, true, 'never healed at all')

@@ -101,9 +101,9 @@ addToLibrary({
      * (session_impl.cpp:1790 reads local_endpoint between bind and listen and never refreshes it).
      * So the number a caller reports as "your inbound port" stays true only for as long as these
      * sockets keep holding it, and after a dropped tunnel it can be a port nobody is bound to while
-     * still being the number every tracker, PEX peer and DHT node has been given. Both reopens try
-     * to reclaim the same number first for exactly that reason, and after a couple of refusals they
-     * take whatever is free, which heals the socket while leaving the announce wrong.
+     * still being the number every tracker, PEX peer and DHT node has been given. Both reopens ask
+     * for that number again for exactly that reason, and only an outage past KEEP_PORT_MS makes
+     * them take whatever is free, which heals the socket while leaving the announce wrong.
      *
      * Reading this is what lets a caller tell those apart instead of showing a dead port with
      * confidence. It is a snapshot: nothing here is retained, and the fd table is the only source.
@@ -259,17 +259,42 @@ addToLibrary({
         st.listening = true
         // a healed acceptor starts its backoff over, so a later drop is not punished for this one
         st.listenReopenAttempts = 0
+        st.outageAt = null
         // getsockname answers from here, so it has to name the port that is really held; libtorrent
-        // snapshotted the original at startup and cannot be told, which is why the reopen tries to
-        // reclaim the same number first
+        // snapshotted the original at startup and cannot be told, which is why the reopen asks for
+        // the first one again
         try {
           const a = server.address()
           if (a) { st.localAddr = a.address; st.localPort = a.port; st.localFamily = a.family }
+          if (st.homePort == null) st.homePort = st.localPort
         } catch (e) {}
       })
     },
 
-    LISTEN_REOPEN_DELAYS: [250, 1000, 3000, 10000, 30000],
+    // Short at the top, so a relay that is back is found within 2 s of answering again: measured with
+    // the old 10 s and 30 s rungs, a relay away for 20 s was found 24.5 s after it came back.
+    LISTEN_REOPEN_DELAYS: [250, 1000, 2000],
+
+    /**
+     * How long an outage may last while a reopen still asks for the port the fd first held, which is
+     * the one trackers, PEX, the DHT and the readout know. A relay that restarted frees it at once;
+     * one that lost our connection holds it for the old session until that session times out. Past
+     * this a reopen takes any free port, since the number may be somebody else's by then and a
+     * socket on the wrong port still beats none.
+     */
+    KEEP_PORT_MS: 60000,
+
+    keepPort(st) {
+      return st.homePort && Date.now() - st.outageAt < FKN.KEEP_PORT_MS ? st.homePort : 0
+    },
+
+    // the delay before a reopen, logged only while it is still growing: past that the relay is simply
+    // away, and a line every 2 s says nothing the first one did not
+    reopenDelay(delays, attempt, what, why) {
+      const delay = delays[Math.min(attempt - 1, delays.length - 1)]
+      if (attempt <= delays.length) console.warn('[FKN] ' + what + ' ' + why + ', reopening in ' + delay + 'ms (attempt ' + attempt + ')')
+      return delay
+    },
 
     /**
      * Put the acceptor back after the relay session under it goes away.
@@ -280,17 +305,15 @@ addToLibrary({
      *
      * The port is reclaimed by name on purpose, unlike an ordinary bind: trackers, PEX and the DHT
      * have already published this number, so keeping it is the difference between healing and
-     * silently moving. After a couple of refusals take whatever is free, since an acceptor on the
-     * wrong port still beats none at all.
+     * silently moving (KEEP_PORT_MS).
      */
     reopenListen(st, why) {
       if (st.closed || st.listenReopening || st.kind !== 'tcp-listen') return
       st.listening = false
       st.listenReopening = true
-      const attempt = st.listenReopenAttempts || 0
-      st.listenReopenAttempts = attempt + 1
-      const delay = FKN.LISTEN_REOPEN_DELAYS[Math.min(attempt, FKN.LISTEN_REOPEN_DELAYS.length - 1)]
-      console.warn('[FKN] tcp listener ' + why + ', reopening in ' + delay + 'ms (attempt ' + st.listenReopenAttempts + ')')
+      if (st.outageAt == null) st.outageAt = Date.now()
+      st.listenReopenAttempts = (st.listenReopenAttempts || 0) + 1
+      const delay = FKN.reopenDelay(FKN.LISTEN_REOPEN_DELAYS, st.listenReopenAttempts, 'tcp listener', why)
       setTimeout(() => {
         st.listenReopening = false
         if (st.closed || st.kind !== 'tcp-listen') return
@@ -302,13 +325,13 @@ addToLibrary({
         FKN.wireListener(st, server)
         // reassigning st.server first is what disarms the stale server's handlers
         try { stale?.close?.() } catch (e) {}
-        try { server.listen(attempt > 1 ? 0 : st.localPort, st.localAddr || '0.0.0.0') }
+        try { server.listen(FKN.keepPort(st), st.localAddr || '0.0.0.0') }
         catch (e) { FKN.reopenListen(st, 'listen-threw') }
       }, delay)
     },
 
     // the datagram socket under a udp fd does not survive losing the connection, so the fd keeps its identity and the socket underneath is replaced, re-bound to the same local port
-    UDP_REOPEN_DELAYS: [250, 1000, 3000, 10000, 30000],
+    UDP_REOPEN_DELAYS: [250, 1000, 2000],
 
     // `adopt` is a socket the host bound before the session existed, already listening on the port
     // wrapper.cpp was told to announce. Adopting it rather than binding a fresh one is what keeps
@@ -357,6 +380,8 @@ addToLibrary({
         if (!mine()) return
         const a = sock.address()
         st.localAddr = a.address; st.localPort = a.port; st.localFamily = a.family
+        if (st.homePort == null) st.homePort = a.port
+        st.outageAt = null
       })
 
       if (adopt) {
@@ -365,18 +390,14 @@ addToLibrary({
         try {
           const a = sock.address()
           st.localAddr = a.address; st.localPort = a.port; st.localFamily = a.family
+          st.homePort = a.port
         } catch (e) {}
         st.bound = true
         return sock
       }
+      // peers learned the port from the DHT's implied_port and keep dialling it (KEEP_PORT_MS)
       if (st.bound) {
-        // Keeping the same port across a reopen is worth one try: peers learned it from the DHT's
-        // implied_port and will keep dialling it. But a named bind is a real bind now that the relay
-        // honours the number, and the socket we just closed may not have released it yet, so after
-        // one refusal take whatever is free. A moved port costs a rebootstrap; no socket costs
-        // everything, and our next datagram teaches storing nodes the new number anyway.
-        const want = (st.reopenAttempts || 0) > 1 ? 0 : st.localPort
-        try { sock.bind(want, st.localAddr) }
+        try { sock.bind(FKN.keepPort(st), st.localAddr) }
         catch (e) { FKN.reopenUdp(st, 'bind') }
       }
       return sock
@@ -386,11 +407,10 @@ addToLibrary({
       if (st.closed || st.reopening) return
       st.dead = true
       st.reopening = true
+      if (st.outageAt == null) st.outageAt = Date.now()
       FKN.stats.udpReopen = (FKN.stats.udpReopen || 0) + 1
-      const attempt = st.reopenAttempts || 0
-      st.reopenAttempts = attempt + 1
-      const delay = FKN.UDP_REOPEN_DELAYS[Math.min(attempt, FKN.UDP_REOPEN_DELAYS.length - 1)]
-      console.warn('[FKN] udp socket ' + why + ', reopening in ' + delay + 'ms (attempt ' + st.reopenAttempts + ')')
+      st.reopenAttempts = (st.reopenAttempts || 0) + 1
+      const delay = FKN.reopenDelay(FKN.UDP_REOPEN_DELAYS, st.reopenAttempts, 'udp socket', why)
       setTimeout(() => {
         st.reopening = false
         if (st.closed) return
@@ -744,7 +764,7 @@ addToLibrary({
       st.listening = true
       try {
         const a = server.address()
-        if (a) { st.localAddr = a.address; st.localPort = a.port; st.localFamily = a.family }
+        if (a) { st.localAddr = a.address; st.localPort = a.port; st.localFamily = a.family; st.homePort = a.port }
       } catch (e) {}
       if (st.acceptQueue.length) FKN.scheduleTick()
     } else {

@@ -204,3 +204,91 @@ test('closing the fd does not trigger a reopen', async () => {
 
   assert.equal(dgram.sockets.length, 1, 'a deliberate close is not an outage')
 })
+
+/**
+ * A relay that grants a bind on a free port on a later turn, as @fkn/lib answers, and refuses one
+ * while it is `away` or on a port in `taken`.
+ */
+const makeRelayDgram = () => {
+  const relay = { away: false, taken: new Set(), binds: [] }
+  relay.createSocket = () => {
+    const sock = new EventEmitter()
+    sock.bind = (port) => {
+      relay.binds.push({ at: Date.now(), port })
+      setTimeout(() => {
+        if (relay.away || relay.taken.has(port)) { sock.emit('error', new Error('refused')); return }
+        sock.granted = port || 50000
+        sock.emit('listening')
+      }, 30)
+    }
+    sock.send = () => {}
+    sock.close = () => {}
+    sock.address = () => ({ address: '0.0.0.0', port: sock.granted, family: 'IPv4' })
+    return sock
+  }
+  return relay
+}
+
+// in steps, because a mocked tick runs only the timers due when it started: one set by a timer that
+// fired during it waits for the next tick
+const STEP = 10
+const advance = (t, ms) => { for (let i = 0; i < ms / STEP; i++) t.mock.timers.tick(STEP) }
+
+const relayUdpState = (t, relay) => {
+  const { FKN } = loadShim(relay)
+  const st = { kind: 'udp', family: 'IPv4', nonblock: false, socket: null, udpRecv: [], reopenAttempts: 0 }
+  FKN._dbgWorkerUdpPkts = 0; FKN._dbgWorkerUdpBytes = 0; FKN._dbgJsBusyUs = 0; FKN._dbgJsHandlerCalls = 0
+  FKN.attachUdp(st)
+  st.socket.bind(6882, '0.0.0.0')
+  st.bound = true
+  t.mock.timers.tick(30)
+  t.after(() => settled(st))
+  const drop = () => { st.socket.emit('error', new Error('WebVPN session closed')); st.socket.emit('close') }
+  const healed = () => !st.dead && st.socket.granted != null
+  return { FKN, st, drop, healed }
+}
+
+test('a relay back after 20 s or 45 s is found within 2 s, on the port the fd held', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
+  const relay = makeRelayDgram()
+  const { st, drop, healed } = relayUdpState(t, relay)
+  assert.equal(st.localPort, 6882)
+
+  for (const awayMs of [20_000, 45_000]) {
+    relay.away = true
+    const from = relay.binds.length
+    drop()
+    advance(t, awayMs)
+    relay.away = false
+    const back = Date.now()
+    for (let i = 0; i < 250 && !healed(); i++) t.mock.timers.tick(STEP)
+    const asked = relay.binds.slice(from)
+    assert.equal(st.socket.granted, 6882, `not back 2.5 s after a relay away ${awayMs} ms`)
+    assert.ok(asked.at(-1).at - back <= 2000 + 30 + 2 * STEP, `found ${asked.at(-1).at - back} ms after a relay away ${awayMs} ms`)
+    assert.deepEqual([...new Set(asked.map((b) => b.port))], [6882], 'a reopen gave up the port peers know')
+  }
+})
+
+test('a port somebody took is given up after KEEP_PORT_MS, and the next outage asks for it again', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
+  const relay = makeRelayDgram()
+  const { FKN, st, drop, healed } = relayUdpState(t, relay)
+
+  relay.taken.add(6882)
+  const from = relay.binds.length
+  const lost = Date.now()
+  drop()
+  for (let i = 0; i < 7000 && !healed(); i++) t.mock.timers.tick(STEP)
+  const asked = relay.binds.slice(from)
+  const moved = asked.findIndex((b) => b.port === 0)
+  assert.ok(moved > 0, 'never took another port')
+  assert.ok(asked.slice(0, moved).every((b) => b.port === 6882 && b.at - lost < FKN.KEEP_PORT_MS), 'gave up the port too early')
+  assert.ok(asked[moved].at - lost >= FKN.KEEP_PORT_MS && asked[moved].at - lost <= FKN.KEEP_PORT_MS + 2000 + 30 + 2 * STEP)
+  assert.equal(st.localPort, 50000)
+
+  relay.taken.clear()
+  drop()
+  for (let i = 0; i < 250 && !healed(); i++) t.mock.timers.tick(STEP)
+  assert.equal(relay.binds.at(-1).port, 6882, 'the next outage did not ask for the published port')
+  assert.equal(st.localPort, 6882)
+})
