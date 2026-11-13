@@ -57,8 +57,9 @@ const SEND_QUEUE_LIMIT = 16 * 1024 * 1024
  * retransmission timeout, is about a thousand datagrams once the send buffer is 1 MiB or more,
  * and a socket puts what one task hands it on the wire together. libtorrent 2.1 ends a
  * connection on reading 1000 datagrams with its socket never empty: with the send buffer at
- * 4 MiB, 11 of 35 uploads of 256 MiB over a 50 ms round trip ended that way, and none of 66
- * with this bound. At the default send buffer a window is some 220 datagrams.
+ * 4 MiB, one upload of 256 MiB in three ended that way over a 50 ms round trip, and none with
+ * this bound (the README has the runs). At the default send buffer a window is some 220
+ * datagrams.
  */
 const MAX_BURST = 128
 
