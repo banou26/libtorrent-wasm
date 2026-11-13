@@ -99,7 +99,11 @@ export type WebtorrentPeersOptions = {
   links: Links
   /** The platform's WebSocket, or one with its shape that goes through the relay. */
   WebSocket: WebSocketClass
-  /** Announced for every torrent known not to be private, beside the torrent's own. None unless given. */
+  /**
+   * Announced beside a torrent's own, for every torrent but a private one. A magnet whose metadata has not said
+   * yet waits for it with `relay`. Without, where only a WebRTC peer can bring the metadata, it is announced to
+   * these too, and they are told `stopped` if it says private. None unless given.
+   */
   trackers?: readonly string[]
   limits?: Partial<Limits>
   /**
@@ -176,6 +180,8 @@ type Announcing = {
 
 type Conn = {
   torrent: Torrent
+  /** The URL of the tracker the attempt goes through. */
+  via: string
   /** We made the offer. */
   ours: boolean
   /** The remote's tracker id, once one is behind the attempt. */
@@ -229,10 +235,13 @@ const seeding = (view: View): boolean => view.hasMetadata && view.left <= 0
 const rank = (view: View): keyof typeof RESERVE =>
   view.watched ? 'watched' : seeding(view) ? 'seeding' : 'downloading'
 
-/** Its own trackers that are not local names, and the defaults once it is known not to be private. */
-const trackersFor = (view: View, defaults: readonly string[]): string[] => {
+/**
+ * Its own trackers that are not local names, and the defaults unless it is private. Until the metadata says,
+ * it counts as private with the relay, where ordinary peers bring the metadata, and as public without.
+ */
+const trackersFor = (view: View, defaults: readonly string[], relay: boolean): string[] => {
   const own = view.trackers.map(trackerUrl).filter(url => url !== null)
-  return [...new Set(view.private === false ? [...own, ...defaults] : own)]
+  return [...new Set((view.private ?? relay) ? own : [...own, ...defaults])]
 }
 
 /** Of our offer and theirs, both ends keep the one from the smaller id. */
@@ -311,8 +320,10 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     )))
   }
 
-  const add = (t: Torrent, ours: boolean, remote: string | null, id: string): Conn => {
-    const conn: Conn = { torrent: t, ours, remote, offerId: id, state: 'making', deadline: Date.now() + MAKING_MS }
+  const add = (t: Torrent, via: string, ours: boolean, remote: string | null, id: string): Conn => {
+    const conn: Conn = {
+      torrent: t, via, ours, remote, offerId: id, state: 'making', deadline: Date.now() + MAKING_MS,
+    }
     t.conns.add(conn)
     live++
     tokens--
@@ -417,8 +428,8 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     left: t.view.hasMetadata ? t.view.left : LEFT_BEFORE_METADATA,
   })
 
-  const offer = async (t: Torrent): Promise<{ conn: Conn, sdp: string } | null> => {
-    const conn = add(t, true, null, offerId())
+  const offer = async (t: Torrent, via: string): Promise<{ conn: Conn, sdp: string } | null> => {
+    const conn = add(t, via, true, null, offerId())
     try {
       const made = await links.offer()
       return attach(conn, made.link) ? { conn, sdp: made.sdp } : null
@@ -439,7 +450,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     const count = Math.min(OFFERS_PER_ANNOUNCE, room(t), others - t.conns.size)
     if (count < 1) return
     announcing.offersDue = false
-    const made = await Promise.all(Array.from({ length: count }, () => offer(t)))
+    const made = await Promise.all(Array.from({ length: count }, () => offer(t, announcing.tracker.url)))
     const ready = made.filter(offered => offered !== null).filter(({ conn }) => t.conns.has(conn))
     if (!ready.length) return
     const sent = announcing.tracker.announce({
@@ -467,7 +478,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       same.forEach(drop)
     }
     if (room(t) < 1) return
-    const conn = add(t, false, remote, id)
+    const conn = add(t, tracker.url, false, remote, id)
     try {
       const made = await links.answer(sdp)
       if (!attach(conn, made.link)) return
@@ -564,6 +575,21 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     announcing.tracker.announce({ ...identity(t), event, offers: [] })
   }
 
+  /**
+   * Says `stopped` to each tracker of the torrent that `wanted` leaves out, and closes what came through it and
+   * is not open yet. An open channel stays: it is a peer of the engine's by then, and libtorrent keeps the
+   * peers a magnet had when its metadata says private.
+   */
+  const leave = (t: Torrent, wanted: readonly string[]) => {
+    for (const [url, announcing] of t.announcing) {
+      if (wanted.includes(url)) continue
+      tell(t, announcing, 'stopped')
+      t.announcing.delete(url)
+      for (const conn of t.conns) if (conn.via === url && conn.state !== 'open') drop(conn)
+      changed()
+    }
+  }
+
   const stop = (t: Torrent) => {
     for (const announcing of t.announcing.values()) tell(t, announcing, 'stopped')
     for (const conn of t.conns) drop(conn)
@@ -587,7 +613,11 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     // torrent is not started while it checks, and one that runs keeps what it has and makes nothing new
     // (`room`) until the check ends.
     if (view.checking) {
-      if (t) t.view.checking = true
+      if (t) {
+        t.view.checking = true
+        // The private flag is the metadata's and waits for no check.
+        leave(t, trackersFor(view, defaults, relay))
+      }
       return
     }
     if (!t) {
@@ -603,7 +633,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     }
     t.view = view
 
-    const wanted = trackersFor(view, defaults)
+    const wanted = trackersFor(view, defaults, relay)
     for (const url of wanted) {
       if (t.announcing.has(url)) continue
       t.announcing.set(url, {
@@ -612,12 +642,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       })
       changed()
     }
-    for (const [url, announcing] of t.announcing) {
-      if (wanted.includes(url)) continue
-      tell(t, announcing, 'stopped')
-      t.announcing.delete(url)
-      changed()
-    }
+    leave(t, wanted)
 
     if (view.hasMetadata && view.left > 0) t.leeching = true
     if (t.leeching && !t.completed && seeding(view)) {

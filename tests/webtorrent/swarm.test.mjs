@@ -36,7 +36,7 @@ const rig = (t, { rtc = fakeRtc(), more = {}, defaults = [TRACKER], ...options }
     /** The announces of a torrent that carried offers, and the ones that carried none. */
     offered: handle => tracker.announces(hashOf(handle)).filter(message => message.offers.length),
     plain: handle => tracker.announces(hashOf(handle)).filter(message => !message.offers.length),
-    answers: () => tracker.received.filter(message => message.answer),
+    answers: (of = tracker) => of.received.filter(message => message.answer),
     /** Connections of the connection class still open, the scripted remotes' included. */
     open: () => rtc.all.filter(pc => !pc.closed).length,
     /** Connections the swarm holds, pending or open. */
@@ -71,6 +71,10 @@ const gatedRig = (t, options = {}) => {
 
 let remotes = 0
 
+/** The event of every message a tracker received for a torrent, answers included, oldest first. */
+const heard = (tracker, handle) =>
+  tracker.received.filter(message => message.info_hash === binary(hashOf(handle))).map(message => message.event)
+
 /** A scripted peer of another client. Its id sorts below ours with `-AA` and above with `-ZZ`. */
 class Remote {
   sockets = []
@@ -78,9 +82,10 @@ class Remote {
   /** Its links that opened and have not closed. */
   opened = new Set()
 
-  /** Its connections are the rig's class unless it is given one of its own. */
-  constructor(rig, prefix = '-XX0001-', rtc = rig.rtc) {
+  /** Its connections are the rig's class, and its messages go through the rig's default tracker, unless it is given others. */
+  constructor(rig, prefix = '-XX0001-', rtc = rig.rtc, through = rig.tracker) {
     this.rig = rig
+    this.through = through
     this.id = prefix + String(remotes++).padStart(12, '0')
     this.links = rtcLinks({ RTCPeerConnection: rtc })
   }
@@ -98,7 +103,7 @@ class Remote {
   }
 
   relay(handle, offerId, description) {
-    this.rig.socket().deliver({ action: 'announce', info_hash: binary(hashOf(handle)), peer_id: this.id, offer_id: offerId, ...description })
+    this.rig.socket(this.through).deliver({ action: 'announce', info_hash: binary(hashOf(handle)), peer_id: this.id, offer_id: offerId, ...description })
   }
 
   /** Sends the swarm an offer through the tracker. */
@@ -112,7 +117,7 @@ class Remote {
 
   /** Applies the swarm's answer to that offer. False when the swarm sent none. */
   async accept({ link, offerId }) {
-    const answer = this.rig.answers().find(message => message.offer_id === offerId && message.to_peer_id === this.id)
+    const answer = this.rig.answers(this.through).find(message => message.offer_id === offerId && message.to_peer_id === this.id)
     if (!answer) return false
     const accepted = await link.accept(answer.answer.sdp).then(() => true, () => false)
     await settle()
@@ -1062,20 +1067,141 @@ test('a private torrent is announced to its own trackers only', async t => {
   assert.deepEqual(r.WebSocket.opened, ['wss://private.test/'])
 })
 
-test('a magnet is not announced to the defaults until its private flag is known', async t => {
+test('with the relay a magnet is not announced to the defaults until its private flag is known', async t => {
   const own = new TestTracker()
-  const r = rig(t, { more: { 'wss://own.test/': own } })
+  const r = rig(t, { relay: true, more: { 'wss://own.test/': own } })
   await r.start(1, { hasMetadata: false, private: undefined, trackers: ['wss://own.test'] })
   await r.start(2, { hasMetadata: false, private: undefined, trackers: ['wss://own.test'] })
+  await r.start(3, { hasMetadata: false, private: undefined })
   await advance(t, 5 * SECOND)
   assert.equal(own.announces().length, 2)
   assert.equal(r.tracker.announces().length, 0)
+  assert.deepEqual(r.WebSocket.opened, ['wss://own.test/'])
 
   r.session.set(1, { hasMetadata: true, private: false })
   r.session.set(2, { hasMetadata: true, private: true })
   await advance(t, 2 * SECOND)
   assert.equal(r.tracker.announces(hashOf(1)).length, 1, 'the public one joins the defaults within a beat')
   assert.equal(r.tracker.announces(hashOf(2)).length, 0)
+  assert.equal(r.tracker.announces(hashOf(3)).length, 0, 'one that names no tracker of its own waits for its ordinary peers')
+})
+
+test('with no relay a magnet is announced to the defaults before its private flag is known, and finds its peers there', async t => {
+  const r = rig(t)
+  r.tracker.phantoms = { complete: 2, incomplete: 0 }
+  // what most magnets are: no WebSocket tracker of their own
+  await r.start(1, { hasMetadata: false, private: undefined })
+  assert.deepEqual(r.plain(1).map(message => message.event), ['started'])
+  assert.equal(r.offered(1)[0]?.offers.length, 2, 'it offers by the count, like any download')
+  assert.equal(await new Remote(r).connect(1), true, 'and an offer it is sent is taken')
+  assert.equal(r.session.streamsOf(1).length, 1)
+  await advance(t, 121 * SECOND, SECOND)
+  assert.deepEqual(r.plain(1).map(message => message.event), ['started', undefined], 'and it is announced again at the interval')
+  r.session.pause(1)
+  await settle()
+  await advance(t, CLOSING)
+  assert.equal(heard(r.tracker, 1).at(-1), 'stopped', 'and a pause is said there too')
+})
+
+test('with no relay a magnet whose metadata says it is not private stays at the defaults', async t => {
+  const own = new TestTracker()
+  const r = rig(t, { more: { 'wss://own.test/': own } })
+  await r.start(1, { hasMetadata: false, private: undefined, trackers: ['wss://own.test'] })
+  const remote = new Remote(r)
+  assert.equal(await remote.connect(1), true)
+  r.session.set(1, { hasMetadata: true, private: false })
+  await advance(t, 121 * SECOND, SECOND)
+  assert.deepEqual(heard(r.tracker, 1), ['started', undefined, undefined], 'its answer to the remote, and the next announce')
+  assert.deepEqual(heard(own, 1), ['started', undefined])
+  assert.deepEqual(r.peers.snapshot().torrents[0].trackers.map(tracker => tracker.url), ['wss://own.test/', TRACKER])
+  assert.equal(remote.closes, 0)
+})
+
+test('with no relay a magnet whose metadata says it is private says stopped to the defaults once, and they hear nothing of it again', async t => {
+  const own = new TestTracker()
+  const r = rig(t, { more: { 'wss://own.test/': own } })
+  await r.start(1, { hasMetadata: false, private: undefined, trackers: ['wss://own.test'] })
+  // a torrent that is not private keeps the default's socket, so anything said there of the first would arrive
+  await r.start(2)
+  assert.deepEqual(heard(r.tracker, 1), ['started'])
+
+  r.session.set(1, { hasMetadata: true, private: true })
+  await advance(t, SECOND)
+  assert.deepEqual(heard(r.tracker, 1), ['started', 'stopped'], 'within a beat')
+  assert.deepEqual(r.peers.snapshot().torrents[0].trackers.map(tracker => tracker.url), ['wss://own.test/'])
+
+  // ten minutes of announces, then the default's socket lost and back, then a pause and a resume
+  await advance(t, 600 * SECOND, SECOND)
+  r.tracker.drop()
+  await advance(t, 13 * SECOND, SECOND)
+  r.session.pause(1)
+  await settle()
+  r.session.resume(1)
+  await advance(t, 121 * SECOND, SECOND)
+  assert.deepEqual(heard(r.tracker, 1), ['started', 'stopped'])
+  assert.equal(heard(r.tracker, 2).filter(event => event === 'started').length, 2, 'the socket that came back carries the other torrent')
+  const atTheInterval = Array(5).fill(undefined)
+  assert.deepEqual(heard(own, 1), ['started', ...atTheInterval, 'stopped', 'started', undefined], 'its own tracker hears it all along')
+})
+
+test('a magnet whose metadata says it is private leaves the defaults while the engine still checks what it holds', async t => {
+  const r = rig(t)
+  await r.start(1, { hasMetadata: false, private: undefined })
+  await r.start(2)
+  r.session.set(1, { hasMetadata: true, private: true, status: { state: 1 } })
+  await advance(t, SECOND)
+  assert.deepEqual(heard(r.tracker, 1), ['started', 'stopped'], 'within a beat')
+  await advance(t, 240 * SECOND, SECOND)
+  assert.deepEqual(heard(r.tracker, 1), ['started', 'stopped'], 'and a check that lasts is not announced through')
+})
+
+test('a magnet that turns out private closes what a default tracker had brought and had not opened yet, and keeps the channel that had', async t => {
+  const own = new TestTracker()
+  const r = rig(t, { more: { 'wss://own.test/': own } })
+  r.tracker.phantoms = { complete: 2, incomplete: 0 }
+  await r.start(1, { hasMetadata: false, private: undefined, trackers: ['wss://own.test'] })
+  // a seeding torrent that is not private keeps the default's socket, and offers nothing itself
+  await r.start(2, { left: 0 })
+  assert.equal(r.offered(1)[0]?.offers.length, 2, 'two offers of ours wait at the default')
+  const opened = new Remote(r)
+  assert.equal(await opened.connect(1), true)
+  await new Remote(r).offer(1)
+  const theirs = new Remote(r, undefined, undefined, own)
+  const throughItsOwn = await theirs.offer(1)
+  const counts = () => {
+    const { open, pending } = r.peers.snapshot().torrents[0]
+    return { open, pending }
+  }
+  assert.deepEqual(counts(), { open: 1, pending: 4 })
+
+  r.session.set(1, { hasMetadata: true, private: true })
+  r.peers.refresh()
+  await settle()
+  await advance(t, CLOSING)
+  assert.deepEqual(counts(), { open: 1, pending: 1 }, 'the two offers and the answer that went through the default are closed')
+  assert.equal(opened.closes, 0, 'the channel that was open is a peer of the engine’s, and stays')
+  assert.equal(r.session.streamsOf(1).length, 1)
+
+  assert.equal(await theirs.accept(throughItsOwn), true, 'what came through its own tracker goes on')
+  assert.equal(await new Remote(r).connect(1), false, 'and an offer that still comes through the default is not answered')
+  assert.deepEqual(counts(), { open: 2, pending: 0 })
+})
+
+test('offers and answers being made for a default tracker when the metadata says private are never sent there', async t => {
+  const { gate, r } = gatedRig(t)
+  r.tracker.phantoms = { complete: 2, incomplete: 0 }
+  await r.start(1, { hasMetadata: false, private: undefined })
+  await r.start(2, { left: 0 })
+  await new Remote(r).offer(1)
+  assert.equal(r.live(), 3, 'two offers and one answer are being made')
+  r.session.set(1, { hasMetadata: true, private: true })
+  r.peers.refresh()
+  gate.open()
+  await settle()
+  await advance(t, CLOSING)
+  assert.deepEqual(heard(r.tracker, 1), ['started', 'stopped'])
+  assert.equal(r.live(), 0)
+  assert.equal(r.open(), 1, 'only the remote’s own connection is left')
 })
 
 test('a torrent that is not running is not announced, and one that stops says so and loses its attempts', async t => {

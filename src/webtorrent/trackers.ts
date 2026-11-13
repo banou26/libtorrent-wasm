@@ -1,6 +1,6 @@
 /**
- * The WebSocket trackers the owner chose to add to every torrent that is not private: WebTorrent's defaults
- * that still answer. Nothing announces to them unless a caller passes them.
+ * The WebSocket trackers the owner chose to add to a torrent's own: WebTorrent's defaults that still answer.
+ * Nothing announces to them unless a caller passes them as `trackers`: that option says which torrents do.
  */
 export const DEFAULT_TRACKERS = ['wss://tracker.openwebtorrent.com', 'wss://tracker.webtorrent.dev']
 
