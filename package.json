@@ -24,6 +24,14 @@
     "./types": {
       "types": "./build/types.d.ts",
       "import": "./build/types.js"
+    },
+    "./webtorrent": {
+      "types": "./build/webtorrent/index.d.ts",
+      "import": "./build/webtorrent/index.js"
+    },
+    "./webtorrent/page": {
+      "types": "./build/webtorrent/page.d.ts",
+      "import": "./build/webtorrent/page.js"
     }
   },
   "scripts": {

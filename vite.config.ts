@@ -31,6 +31,8 @@ export default defineConfig({
         index: 'src/index.ts',
         opfs: 'src/opfs.ts',
         types: 'src/types.ts',
+        'webtorrent/index': 'src/webtorrent/index.ts',
+        'webtorrent/page': 'src/webtorrent/page.ts',
       },
       formats: ['es'],
     },
