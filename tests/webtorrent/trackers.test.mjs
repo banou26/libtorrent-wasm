@@ -78,7 +78,7 @@ test('bytes that are not a torrent give an empty list and never throw', async ()
   const cases = [
     new Uint8Array(0), crypto.randomBytes(512), good.subarray(0, good.length - 40), Buffer.from('l'.repeat(100_000)),
     Buffer.from('d8:announce'), Buffer.from('i12e'), Buffer.from('d8:announcei7ee'), Buffer.from('99999999999:x'),
-    // Cut inside a length, and lengths that are not one, each after a tracker the reader has already seen.
+    // Cut inside a length, and lengths that are not digits: a reader that took them would never come back.
     Buffer.from('d12'), Buffer.from('d8:announce16:wss://first.test12'),
     Buffer.from('d8:announce16:wss://first.test1x:ae'), Buffer.from('d8:announce16:wss://first.test-3:e'),
   ]

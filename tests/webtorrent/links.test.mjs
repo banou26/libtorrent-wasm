@@ -182,7 +182,7 @@ test('a connection that fails while it gathers gives no description', async t =>
   pc.connectionState = 'failed'
   pc.onconnectionstatechange({})
   await advance(t, 3000, 1000)
-  await refused
+  await within('the refusal', refused)
   assert.equal(pc.closed, true)
 })
 

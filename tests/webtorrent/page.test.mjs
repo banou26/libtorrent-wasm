@@ -251,7 +251,7 @@ test('the page keeps no reference to a connection whose link ended, however it e
     collect()
   }
   const reachable = made.filter(({ connection }) => connection.deref()).map(({ ending }) => ending)
-  assert.deepEqual(reachable, ['held on purpose'], 'and the check can tell: the one this case holds is still there')
+  assert.deepEqual(reachable, ['held on purpose'], 'only the one this case still holds is left, which also shows the check can tell')
   assert.equal(made.length, 5, 'one connection for each ending, and the one held')
   held.close()
 })
@@ -269,7 +269,7 @@ test('a request the page refused is over for the worker: no flush follows it and
   await assert.rejects(within('the refusal', links.offer()), LinksFull)
   await settle()
   assert.deepEqual(worker.said, { offer: 1 })
-  assert.equal(timers(), before)
+  assert.equal(timers(), before, 'the gathering cap of a request that is over is not left armed')
 })
 
 test('an answer the page cannot apply closes the link on the worker side', async t => {
