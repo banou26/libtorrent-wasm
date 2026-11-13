@@ -178,9 +178,12 @@ export class Host {
     socket.on('close', this.fail)
   }
 
-  /** Hands the socket a datagram, or holds it once MAX_BURST have gone out in this millisecond. */
+  /**
+   * Hands the socket a datagram, or holds it once MAX_BURST have gone out in this millisecond.
+   * A closing factory holds nothing: the last words of every connection go out, however many.
+   */
   transmit(data: Uint8Array, port: number, address: string) {
-    if (this.#burst < MAX_BURST) {
+    if (this.closed || this.#burst < MAX_BURST) {
       this.#burst++
       if (this.#spent !== task) {
         this.#spent = task
@@ -292,8 +295,7 @@ export class Host {
     this.socket.off('message', this.receive)
     this.socket.off('error', this.fail)
     this.socket.off('close', this.fail)
-    // the last words of each connection go out now, and the data that waits never does
-    this.#burst = 0
+    // the data that waits never goes out
     for (const connection of this.connections) end(connection)
     clearTimeout(this.#timer)
   }

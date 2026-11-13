@@ -164,6 +164,15 @@ test('closing the factory in the middle of a burst tells the peer at once, and h
   assert.equal(handed.length, afterClose)
 })
 
+test('closing a factory with more connections than the bound tells every peer', { timeout: 60_000 }, async (t) => {
+  // the last word of each connection is a datagram: 130 of them at once, where a task hands over 128
+  const { local, links } = await star(t, 130)
+  const told = Promise.all(links.map(({ theirs }) => once(theirs, 'connectionstatechange', 3000)))
+  local.webrtc.close()
+  await told
+  assert.deepEqual([...new Set(links.map(({ theirs }) => theirs.connectionState))], ['failed'])
+})
+
 test('three connections on one socket each get their own datagrams', async (t) => {
   const { local, links } = await star(t, 3)
   const results = await Promise.all(
