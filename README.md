@@ -224,19 +224,37 @@ a peer. The engine itself does not import them, and neither carries any wasm.
 | `libtorrent-wasm/webtorrent` | the engine worker | the tracker client, the swarm's rules, and the links to a WebRTC implementation |
 | `libtorrent-wasm/webtorrent/page` | the page that owns the worker | makes the browser's peer connections for the worker and carries their bytes over one `MessagePort` |
 
-A worker has no `RTCPeerConnection` in any browser, so with the browser's own WebRTC the connections are made in
-the page and every decision stays in the worker:
+### The direct mode
+
+A session with no relay behind it, whose peers are all WebRTC peers. Three parts, each of which the caller
+wires: the engine on `offlineHost()`, which reaches nothing by itself; the swarm in the engine worker, which
+finds peers through WebSocket trackers; and the page that owns the worker, which makes the connections, since a
+worker has no `RTCPeerConnection` in any browser. Every decision stays in the worker.
 
 ```js
 // the engine worker
+import { createSession, offlineHost } from 'libtorrent-wasm'
+import { OPFSStorage } from 'libtorrent-wasm/opfs'
 import { webtorrentPeers, pageLinks, DEFAULT_TRACKERS } from 'libtorrent-wasm/webtorrent'
+
+const session = await createSession({
+  ...offlineHost(), storage: new OPFSStorage(), enableDht: false, reserveListenPort: false,
+})
 
 const { port1, port2 } = new MessageChannel()
 postMessage({ type: 'peer-links', port: port2 }, [port2])
 const peers = webtorrentPeers(session, { links: pageLinks(port1), WebSocket, trackers: DEFAULT_TRACKERS })
 peers.onchange = () => postMessage({ type: 'peers', snapshot: peers.snapshot() })
 
+// the session's pump, as for any session: the swarm reads what it leaves behind
+setInterval(() => {
+  session.popAlerts()
+  for (const handle of session.torrents()) session.postStatus(handle)
+  peers.refresh()
+}, 500)
+
 // the page
+import { RTCPeerConnection } from '@banou/ponyfill'
 import { servePeerLinks, DEFAULT_ICE_SERVERS } from 'libtorrent-wasm/webtorrent/page'
 
 worker.addEventListener('message', ({ data }) => {
@@ -244,7 +262,34 @@ worker.addEventListener('message', ({ data }) => {
 })
 ```
 
-With a WebRTC stack that runs in the worker, the same signalling drives its class directly:
+- **The session** is the ordinary one over a host that carries nothing ([above](#a-session-with-no-relay)).
+  Torrents are added, paused and removed on it as on any session, and the swarm follows.
+- **The trackers and the STUN host are the caller's to pass.** `DEFAULT_TRACKERS` and `DEFAULT_ICE_SERVERS`
+  are constants, and nothing is contacted when they are left out. A torrent's own `ws` and `wss` trackers come
+  from the session (`webSocketTrackers`), from a magnet link, a .torrent file and resume data alike.
+- **The class** is `RTCPeerConnection` of `@banou/ponyfill`. Chromium counts a closed connection against its
+  500 a page until a garbage collection, and that class brings those slots back when a construction is
+  refused. The browser's own class works until that limit.
+- **A magnet that names no `ws` or `wss` tracker finds nobody in this mode.** Until its metadata says whether
+  it is private it is announced to its own trackers only, and with no relay only a peer can bring the metadata.
+
+What `peers.snapshot()` tells an interface, for each running torrent (`torrents[]`) and for the session:
+
+| field | what it says |
+| --- | --- |
+| `open`, `pending` | WebRTC peers connected for the torrent, and attempts under way, unanswered offers included |
+| `lastPeerAt` | when a peer last connected, or null: none yet in this session |
+| `trackers[]` | for each: `url`, `connected`, `answeredAt` (null until its first answer), `seeders` and `leechers` as it counted them, this session included, and `failure`, its own words when it refused the last announce |
+| `silent` | remotes whose channel opened and ended without a byte from them in the last ten minutes: peers that will not talk to this address, which is not the same as nobody being there |
+| `unmade` (session) | connections the WebRTC class would not make because the page had no slot then. Not an error to show: the next announce tries again |
+| `dropped` (session) | tracker messages that did not validate |
+
+So "no peers yet, still searching" is a torrent whose trackers have answered, with `open` at 0 and `lastPeerAt`
+null, and it is taken back when `open` rises. `onchange` fires after any of it changed.
+
+### With a WebRTC stack in the worker
+
+The same signalling drives a class that lives in the worker directly:
 
 ```js
 import { webtorrentPeers, rtcLinks, DEFAULT_TRACKERS } from 'libtorrent-wasm/webtorrent'
