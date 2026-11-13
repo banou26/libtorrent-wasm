@@ -9,27 +9,17 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test, { after } from 'node:test'
 
-import { PRIORITY, TORRENT_STATE, offlineHost } from '../../build/index.js'
+import { PRIORITY, offlineHost } from '../../build/index.js'
 import { rtcLinks, webtorrentPeers } from '../../build/webtorrent/index.js'
-import { bdecode, bencode, magnetFor } from '../rig/make-torrent.mjs'
+import { bencode, magnetFor } from '../rig/make-torrent.mjs'
 import { waitFor } from '../rig/peer-handshake.mjs'
-import { MiB, done, fixture, savedSha256, startEngine, teardown, tempDir } from '../rig/stream-engine.mjs'
+import { MiB, fixture, savedSha256, startEngine, teardown, tempDir } from '../rig/stream-engine.mjs'
+import { TRACKER, download, routedWebSocket, seed, swarmOver } from './engine-swarm.mjs'
 import { fakeRtc, nativeRtc, referenceTracker, releaseNativeRtc } from './fakes.mjs'
 
 after(releaseNativeRtc)
 
-// The name both torrents give their tracker. The swarm opens no socket to a loopback name a torrent gives,
-// so the socket class below is a network on which this public name is the reference tracker.
-const TRACKER = 'wss://tracker.test/'
-
-const routedWebSocket = (url) => class extends WebSocket {
-  static opened = []
-  constructor(asked) {
-    Routed.opened.push(asked)
-    if (asked !== TRACKER) throw new Error(`a socket to ${asked}`)
-    super(url)
-  }
-}
+// the network of the case that is running: the tracker's public name, and nothing else
 let Routed
 
 /** offlineHost() with every ask of it counted. */
@@ -51,71 +41,11 @@ const countedHost = () => {
   }
 }
 
-/**
- * What the swarm reads of a session, with every stream it hands over recorded in `handed`. `cut` refuses
- * each one. `checks` holds the state the engine passes through when a magnet's metadata arrives for half a
- * second, which is how a pump that read it at that moment leaves it until its next round.
- */
-const seenThrough = (session, handed, { cut = false, checks = false }) => {
-  const since = new Map()
-  return {
-    torrents: () => session.torrents(),
-    infohash: (handle) => session.infohash(handle),
-    status: (handle) => {
-      const status = session.status(handle)
-      if (!checks || !status?.hasMetadata) return status
-      if (!since.has(handle)) since.set(handle, Date.now())
-      return Date.now() - since.get(handle) < 500 ? { ...status, state: TORRENT_STATE.checkingResumeData } : status
-    },
-    isPrivate: (handle) => session.isPrivate(handle),
-    webSocketTrackers: (handle) => session.webSocketTrackers(handle),
-    hasStreamWindow: (handle) => session.hasStreamWindow(handle),
-    addPeerStream: (handle, socket) => {
-      handed.push(handle)
-      if (cut) throw new Error('this session takes no stream')
-      return session.addPeerStream(handle, socket)
-    },
-  }
-}
-
 /** An engine that can reach nothing, and a swarm over its session, as it is or seen through `seenThrough`. */
 const side = async (defer, dir, RTCPeerConnection, through) => {
   const host = countedHost()
   const engine = await startEngine(defer, dir, { host })
-  const handed = []
-  const peers = webtorrentPeers(through ? seenThrough(engine.session, handed, through) : engine.session, {
-    links: rtcLinks({ RTCPeerConnection, iceServers: [] }), WebSocket: Routed,
-  })
-  defer(() => peers.close())
-  return { ...engine, host, peers, handed, of: (handle) => peers.snapshot().torrents.find((torrent) => torrent.handle === handle) }
-}
-
-/** `from` holds the fixture and seeds it under `savePath`, and the tracker lists it. */
-const seed = async (from, fx, savePath) => {
-  fs.mkdirSync(path.join(from.dir, savePath), { recursive: true })
-  fs.writeFileSync(path.join(from.dir, savePath, fx.meta.name), fx.bytes)
-  const torrent = bencode({ ...bdecode(fx.meta.torrent), announce: TRACKER })
-  const handle = await from.running(from.session.addTorrentFile(torrent, `/${savePath}`))
-  await waitFor('the seed to hold every piece', () => from.session.status(handle)?.numPiecesHave === fx.meta.pieces)
-  // a download that announced before its seed is told of nobody, and asks again only at the tracker's interval
-  await waitFor('the tracker to list the seed', () => from.of(handle)?.trackers[0]?.seeders === 1)
-  return handle
-}
-
-/**
- * `to` adds the fixture's magnet. Resolves once it holds the file, with its handle and what carried its peers
- * meanwhile (two seeds drop each other, so the peer is gone soon after). Rejects after `ms`.
- */
-const download = async (to, fx, savePath, ms) => {
-  const magnet = `${magnetFor(fx.meta.infoHash, fx.meta.name)}&tr=${encodeURIComponent(TRACKER)}`
-  const handle = await to.running(to.session.addMagnet(magnet, `/${savePath}`))
-  const carriedBy = new Set()
-  await waitFor('the download', () => {
-    void to.session.peers(handle)
-    for (const peer of to.session.lastPeers(handle)) carriedBy.add(peer.transport)
-    return done(to.session, handle)
-  }, ms)
-  return { handle, carriedBy: [...carriedBy] }
+  return { ...engine, host, ...swarmOver(defer, engine, { links: rtcLinks({ RTCPeerConnection, iceServers: [] }), WebSocket: Routed }, through) }
 }
 
 const bothWays = async (t, RTCPeerConnection) => {
