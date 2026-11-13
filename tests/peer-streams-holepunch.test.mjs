@@ -121,7 +121,7 @@ test('an ordinary peer is still asked for a holepunch rendezvous: either side of
   assert.deepEqual(await holepunchAfterNaming(engine.host, peers), peers.map((_, i) => [{ type: 'rendezvous', endpoint: `${NAMED[i]}:6881` }]))
 })
 
-test('no holepunch message from a stream peer is acted on, and a rendezvous between ordinary peers is served', async (t) => {
+test('no holepunch message from or about a stream peer is acted on, and a rendezvous between ordinary peers is served', async (t) => {
   const defer = teardown(t)
   const engine = await startCounted(defer)
   const [first, second] = [await ordinaryPeer(defer, engine, OUTSIDE[0]), await ordinaryPeer(defer, engine, OUTSIDE[1])]
@@ -136,8 +136,16 @@ test('no holepunch message from a stream peer is acted on, and a rendezvous betw
   assert.deepEqual(stream.peer.holepunch, [])
   assert.deepEqual(engine.host.datagrams.filter((d) => d.address === NAMED[0]), [], 'a peer a stream peer said to connect to was dialled')
 
+  // a peer that names a stream address gets it back in the refusal, the one holepunch message that carries one
+  const refused = { type: 'failed', endpoint: stream.endpoint }
+  second.peer.sendHolepunch('rendezvous', stream.endpoint)
+  await roundTrip(second.peer)
+  await roundTrip(stream.peer)
+  assert.deepEqual(second.peer.holepunch, [refused])
+  assert.deepEqual(stream.peer.holepunch, [], 'a stream peer was told to connect to an ordinary peer')
+
   second.peer.sendHolepunch('rendezvous', first.endpoint)
-  await waitFor('both ordinary peers to be told of each other', () => first.peer.holepunch.length && second.peer.holepunch.length)
+  await waitFor('both ordinary peers to be told of each other', () => first.peer.holepunch.length && second.peer.holepunch.length > 1)
   assert.deepEqual(first.peer.holepunch, [{ type: 'connect', endpoint: second.endpoint }])
-  assert.deepEqual(second.peer.holepunch, [{ type: 'connect', endpoint: first.endpoint }])
+  assert.deepEqual(second.peer.holepunch, [refused, { type: 'connect', endpoint: first.endpoint }])
 })
