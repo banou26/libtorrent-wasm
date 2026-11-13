@@ -41,11 +41,11 @@ export const tempDir = (defer) => {
   return root
 }
 
-/** A directory for one test with a fixture in it, and the fixture's torrent and SHA-256. */
-export const fixture = (defer, size, pieceLength = 256 * 1024) => {
+/** A directory for one test with a fixture in it, and the fixture's torrent and SHA-256. Another `seed` gives other bytes. */
+export const fixture = (defer, size, pieceLength = 256 * 1024, seed = undefined) => {
   const root = tempDir(defer)
   const file = path.join(root, 'fixture.bin')
-  writeFixture(file, size)
+  writeFixture(file, size, seed)
   const bytes = fs.readFileSync(file)
   return {
     root, bytes,
