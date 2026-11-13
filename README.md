@@ -19,6 +19,8 @@ src/           # the WASM port itself
   opfs.ts            - StorageBackend impl backed by the OPFS
   types.ts           - shared TS types
   webtorrent/        - WebRTC peers through WebSocket trackers (two optional entries, no wasm)
+src/webrtc/    # the optional ./webrtc entry: an RTCPeerConnection over a UDP socket the caller owns
+webrtc/        # that entry's stack: a Rust crate around str0m, built by cargo for wasm32-wasip1
 src/app/       # browser harness with diagnostic pages
 dist/          # emcc output (gitignored)
 build/         # vite output + copied wasm artefacts (gitignored)
@@ -467,6 +469,219 @@ cd src/app
 npm install
 npm run dev    # vite dev server on :4560
 ```
+
+## WebRTC over a socket you own (`libtorrent-wasm/webrtc`)
+
+An optional entry, apart from the torrent engine: a WebRTC data channel stack
+([str0m](https://github.com/algesten/str0m) 0.25.0, compiled to wasm) behind a
+class shaped like `RTCPeerConnection`, whose every packet goes out through a UDP
+socket the caller hands it. The browser's own `RTCPeerConnection` sends its
+packets itself, from the device's address. With this one a peer sees the address
+of the socket, so code written against `RTCPeerConnection` can take either
+constructor.
+
+```js
+import { createWebRTC } from 'libtorrent-wasm/webrtc'
+
+const webrtc = await createWebRTC({
+  socket,          // dgram-shaped and already bound: send(bytes, port, address), 'message', 'error', 'close'
+  address, port,   // the public IPv4 address and port at which peers reach that socket
+})
+const pc = new webrtc.RTCPeerConnection()
+const channel = pc.createDataChannel('data')
+await pc.setLocalDescription()
+// once iceGatheringState is 'complete': send pc.localDescription, then set the peer's answer
+webrtc.close()
+```
+
+It runs on one thread, in a page, a worker or node, and needs no cross-origin
+isolation. It imports nothing: not `@fkn/lib`, not a node module, and nothing of
+the engine. The wasm is fetched from beside the module; a bundler that moves
+files passes it as `wasm` (`libtorrent-wasm/webrtc.wasm` resolves to it).
+
+### What it stands in for
+
+Events arrive through `addEventListener` and through the `on` handlers alike.
+
+- **`RTCPeerConnection`**: `new RTCPeerConnection(config)` (`iceServers` is
+  accepted and ignored: the one candidate is the pair the factory was given, and
+  no STUN server is asked), `createDataChannel`, `createOffer`, `createAnswer`,
+  `setLocalDescription`, `setRemoteDescription`, `localDescription`,
+  `remoteDescription`, `iceGatheringState` with `icegatheringstatechange` and
+  `icecandidate` (the host candidate, then `null`; the description carries the
+  candidate from the start), `connectionState` with `connectionstatechange`,
+  `ondatachannel`, `sctp.maxMessageSize`, `close()`.
+- **`RTCDataChannel`**: `label`, `readyState`, `binaryType`, `send` (a string, an
+  `ArrayBuffer` or a view), `bufferedAmount`, `bufferedAmountLowThreshold` with
+  `bufferedamountlow`, `close()`, and `open`, `message`, `error`, `close`.
+- **The errors are Chrome's**, compared with Chrome 156 by a test. `send` throws
+  `InvalidStateError` unless the channel is open, `TypeError` over
+  `sctp.maxMessageSize`, and `OperationError` once 16 MiB is queued, after which
+  the channel goes on. `setRemoteDescription` rejects with `OperationError` for
+  text that is not SDP, `InvalidAccessError` for a description the stack refuses
+  (which ends the connection), `InvalidStateError` out of order.
+- **Every connection of a factory shares the one socket.** A datagram from a new
+  address goes to the connection whose ICE user name it carries; one that belongs
+  to none is dropped and counted in `droppedDatagrams`. The socket's `error` or
+  `close` ends every connection.
+- **`connectionState` is `failed` at once** when the peer closes its connection
+  or the socket goes, and 21.5 s after the peer goes quiet (measured). `closed`
+  comes from `close()`, with no event, as on the platform.
+
+### What it refuses
+
+- Media, trickle ICE (there is no `addIceCandidate`), a second offer on a
+  connection, TURN, mDNS names, IPv6 and TCP candidates.
+- Channels that are not ordered and reliable, and `negotiated`, `id` and
+  `protocol`: `NotSupportedError`. `binaryType` is `'arraybuffer'` only.
+- An empty message: `NotSupportedError` (see the traps).
+- Remote candidates whose address is not a public IPv4 address, unless
+  `allowPrivateCandidates` is set: private, loopback, link-local, shared
+  (100.64.0.0/10), documentation, benchmark, multicast and reserved addresses. A
+  relay refuses a datagram to any of them and writes a log line for each, and ICE
+  would send several a second.
+- **A second connection between the same two sockets.** Only STUN names the
+  connection it belongs to, so two connections whose packets come from one
+  address and port cannot be told apart. Measured between two factories: the
+  second stays `connecting`, the first is not disturbed. Browsers and
+  libdatachannel use a port per connection, so it takes two peers that both use
+  this module.
+- A connection no peer ever reaches stays `connecting`: close it on a timeout of
+  your own.
+
+### Building it
+
+```sh
+npm run build:webrtc   # build/webrtc.wasm, build/webrtc.js, build/webrtc/*.d.ts
+npm run test:webrtc
+```
+
+It needs cargo through rustup (`webrtc/rust-toolchain.toml` pins Rust 1.100.0 and
+the `wasm32-wasip1` target), `tar` and `patch`. No Docker, no Emscripten and no C
+compiler. On NixOS: `nix shell nixpkgs#rustup -c npm run build:webrtc`. `npm run
+build` runs it after the engine.
+
+`webrtc/patch-sctp-proto.mjs` runs first: it takes sctp-proto 0.10.8 from
+crates.io (checked against the SHA-256 the lockfile held for it), unpacks it into
+`webrtc/vendor/` (gitignored) and applies `webrtc/patches/*.patch`, where
+`[patch.crates-io]` then finds it. Deleting a patch file takes its change out.
+
+The tests are `node --test` on loopback and in-memory sockets: against
+libdatachannel 0.24 (`node-datachannel`) in both roles, against itself, and
+against the system Chrome, headless (`CHROME_BIN`, or the first Chrome on the
+`PATH`; skipped when there is none). `WEBRTC_TEST_MIB=64` makes the transfer
+tests 64 MiB each way instead of 16.
+
+### Measurements
+
+2026-11-13, Ryzen 7 9800X3D, node 26.12.1, Chrome 156.0.8078.47, libdatachannel
+0.24.2, everything on loopback, 16 KiB messages, SHA-256 equal in every run,
+three runs each (lowest to highest), with other work on the machine (load 2 to
+5). `tests/webrtc/rig/bench.mjs` produces every row. "50 ms" holds each datagram
+25 ms in each direction in a JavaScript timer: an indication, not a network.
+
+**Shipped sizes**
+
+| file | raw | gzip -9 | brotli -q 11 |
+| --- | --- | --- | --- |
+| `build/webrtc.wasm` | 3,143,661 | 1,039,304 | 752,104 |
+| `build/webrtc.js` | 29,318 | 9,246 | 8,145 |
+
+**Release profile**, MiB/s with libdatachannel at the default send buffer
+
+| profile | raw | brotli | to it | from it |
+| --- | --- | --- | --- | --- |
+| `opt-level = 3`, LTO (shipped) | 3,143,661 | 752,104 | 52.6 to 56.0 | 70.4 to 71.2 |
+| `opt-level = "s"` | 2,317,979 | 618,516 | 45.8 to 46.4 | 58.9 to 60.2 |
+| `opt-level = "z"` | 2,059,742 | 578,238 | 28.2 to 29.3 | 35.3 to 36.0 |
+| `opt-level = "z"` and `wasm-opt -Oz` (binaryen 133) | 1,757,906 | 579,005 | 37.3 to 39.0 | 44.8 to 46.8 |
+
+The stack holds one core at 100% at these rates, so size is paid for in speed:
+the smallest build saves 173,099 bytes of brotli once per download and costs 30%
+of the rate one way and 35% the other for as long as the page runs, and it would
+put binaryen in every build. So `opt-level = 3`.
+
+**Rates at the default send buffer** (256 KiB), MiB/s
+
+| remote | to it | from it |
+| --- | --- | --- |
+| libdatachannel 0.24.2, we offer | 43.2 to 54.2 | 58.6 to 70.5 |
+| libdatachannel 0.24.2, it offers (two runs) | 48.7 to 53.5 | 59.6 to 67.3 |
+| Chrome 156 | 44.0 to 52.8 | 56.6 to 71.4 |
+| itself, both ends on one thread of a dedicated worker in Chrome | 28 to 32 |  |
+
+**The send buffer** (`sendBufferSize`), MiB/s from us to the remote
+
+| send buffer | libdatachannel | libdatachannel, 50 ms | Chrome | Chrome, 50 ms |
+| --- | --- | --- | --- | --- |
+| 256 KiB (default) | 43.2 to 54.2 | 4.5 to 4.6 | 44.0 to 52.8 | 4.5, 1.8, 4.5 |
+| 512 KiB | 43.4 to 45.1 | 8.1 to 8.2 | 34.5 to 44.3 | 8.1, 8.0, 8.0 |
+| 1 MiB | 31.2 to 32.8 | 11.9 to 12.5 | 31.7 to 33.8 | 5.6, 2.3, 8.4 |
+| 2 MiB | 32.7 to 33.3 | 12.4 to 12.5 | 20.7 to 22.1 | 4.1, 3.7, 3.8 |
+| 4 MiB | 30.6 to 32.6 | 12.5 | 11.3 to 12.7 | 1.3, 5.4, 2.5 |
+
+The buffer is the window: at most that much is in flight, so the rate is at most
+the buffer per round trip (5 MiB/s at 50 ms for 256 KiB, 4.5 measured). A larger
+one is faster while the peer keeps up, and goes out in larger bursts. Toward
+Chrome that stopped paying at 1 MiB, and two earlier runs on a busier machine
+(load 7 to 14) had 512 KiB at 0.8 and 1.5 MiB/s toward Chrome at 50 ms where
+256 KiB held 4.5 both times. The default is the size whose rate depended least
+on the peer; it is also the least the option takes, the largest message. A
+caller that knows its path can raise it.
+
+**The two sctp-proto patches**, MiB/s with libdatachannel
+
+| sctp-proto 0.10.8 | to it, 256 KiB buffer | to it, 1 MiB buffer | from it, 50 ms |
+| --- | --- | --- | --- |
+| as published | 33.9 to 36.5 | 12.9 to 13.4 | 0.7 to 0.9 |
+| with `0001` (no expiry walk without a lifetime) | 44.4 to 55.2 | 29.6 to 33.3 | 0.6 to 1.1 |
+| with `0002` (acknowledge after 20 ms, not 200) | 31.9 to 34.8 | 12.3 to 13.2 | 4.2 to 9.6 |
+| with both (shipped) | 52.1 to 55.5 | 30.0 to 33.5 | 4.4 to 9.6 |
+
+`0001`: upstream walks every chunk in flight on every poll to look for expired
+messages, which reliable channels never have. `0002`: libdatachannel acknowledges
+after 20 ms itself, and a libdatachannel sender behind a round trip is several
+times slower toward a receiver that waits 200.
+
+### Traps
+
+Each of these was found by getting it wrong.
+
+- **str0m's own `rust-crypto` feature pulls a C library.** It turns on dimpl's
+  `rcgen` feature, which is `["dep:rcgen", "aws-lc-rs"]`. The crate depends on
+  str0m with no feature and on dimpl with `rust-crypto` alone, carries a copy of
+  str0m's provider (`webrtc/src/provider`), and takes its certificate from
+  WebCrypto. `cargo build --locked` and `tests/webrtc/build.test.mjs` fail when
+  that changes.
+- **Every call that changes a connection is followed by a full drain of
+  `poll_output`**, before the next one. That is str0m's one contract, and breaking
+  it still passes every hash check. The wrapper makes each change an operation
+  with its drain; a test reads the order of the calls into the wasm.
+- **A description is followed by a timeout input.** str0m's ICE agent schedules
+  nothing until it has been told the time once, so an answering side would wait
+  for the peer's first check for ever.
+- **`wasm32-wasip1`, not `wasm32-unknown-unknown`**: str0m reads the clock itself.
+  The six WASI calls it imports are written by hand in `src/webrtc/wasi.ts`.
+  rustup reads `rust-toolchain.toml` from the working directory, never from a
+  `--manifest-path`.
+- **str0m refuses a message larger than its free send buffer**, which defaults to
+  128 KiB, so the send buffer is never below the largest message (262144).
+- **str0m 0.25.0 takes an empty message and sends nothing**, and the channel then
+  waits for ever on the sequence number it used up. `send` refuses one.
+- **Reading the buffered amount goes through `&mut Rtc`**, which the contract
+  counts as a change. It only marks the next poll to look at everything, and
+  draining after it cost 8 to 14% of the upload rate, so that one read is not
+  drained.
+- **`bufferedAmount` counts until the peer acknowledges**, because the stack holds
+  the bytes until then. The platform stops counting when they leave.
+- **A peer closing its connection arrives as one event for the connection**, with
+  none for its channels: the wrapper closes them. A peer closing only its channel
+  does arrive as that channel closing, and the connection stays up.
+- **A test that proves a limit is a counted loop.** "Send until it throws" never
+  ends once the limit is gone, and a loop that never yields is one no test
+  timeout stops (`fill()` in `tests/webrtc/rig/local.mjs`).
+- **On a Wayland desktop Chrome opens a window even when asked for none**, unless
+  `WAYLAND_DISPLAY` and `NIXOS_OZONE_WL` are taken out of its environment.
 
 ## Patches
 
