@@ -62,14 +62,19 @@ export class ScriptedPeer {
   #socket = null
   #serve
   #reqq
+  #listenPort
 
-  /** `reqq` is how many requests this peer says it takes at once (BEP 10), 0 to say nothing. */
-  constructor({ infoHash, port, serve = null, socket = null, reqq = 0 }) {
+  /**
+   * `reqq` is how many requests this peer says it takes at once, and `listenPort` the port it says
+   * it can be dialled on (both BEP 10), 0 to say nothing.
+   */
+  constructor({ infoHash, port, serve = null, socket = null, reqq = 0, listenPort = 0 }) {
     this.infoHash = Buffer.from(infoHash, 'hex')
     this.port = port
     this.#serve = serve
     this.#socket = socket
     this.#reqq = reqq
+    this.#listenPort = listenPort
   }
 
   /**
@@ -105,7 +110,7 @@ export class ScriptedPeer {
           clearTimeout(late)
           socket.write(frame(MSG.extended, Buffer.concat([
             Buffer.from([0]),
-            Buffer.from(`d1:md11:lt_donthavei${DONT_HAVE_ID}e12:ut_holepunchi${HOLEPUNCH_ID}e6:ut_pexi${PEX_ID}ee${this.#reqq ? `4:reqqi${this.#reqq}e` : ''}e`),
+            Buffer.from(`d1:md11:lt_donthavei${DONT_HAVE_ID}e12:ut_holepunchi${HOLEPUNCH_ID}e6:ut_pexi${PEX_ID}ee${this.#listenPort ? `1:pi${this.#listenPort}e` : ''}${this.#reqq ? `4:reqqi${this.#reqq}e` : ''}e`),
           ])))
           if (this.#serve) socket.write(Buffer.concat([frame(MSG.haveAll), frame(MSG.unchoke)]))
           else socket.write(Buffer.concat([frame(MSG.haveNone), frame(MSG.interested)]))

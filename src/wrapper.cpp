@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 
 #ifdef __EMSCRIPTEN__
 // strong override for emscripten's weak stub, which returns -ENOPROTOOPT and makes Asio refuse to write
@@ -88,6 +89,10 @@ struct session_state {
   // magnet or a .torrent (is_valid_tracker_url), so they are kept here for whoever announces to
   // them, and written to resume data under RESUME_WS_TRACKERS, which libtorrent does not read.
   std::unordered_map<std::uint32_t, std::vector<std::string>> ws_trackers;
+  // Every address lt_torrent_add_channel_peer named inside 100.64.0.0/10: the ones
+  // Session.addPeerStream made up. The range alone does not tell a stream peer, since an ordinary
+  // one can dial in from a carrier's network that uses it.
+  std::unordered_set<std::uint32_t> stream_peers;
   std::uint32_t next_handle_id = 1;
 };
 
@@ -314,7 +319,9 @@ bool is_stream_address(lt::address const& a) {
 // connected to. Loaded back, the stale entry is dialled and refused, which stamps it, and a new
 // stream given that address then waits out min_reconnect_time: measured 55.7 s against 0.2 s.
 void drop_stream_peers(lt::add_torrent_params& p) {
-  auto const stream = [](lt::tcp::endpoint const& ep) { return is_stream_address(ep.address()); };
+  auto const stream = [](lt::tcp::endpoint const& ep) {
+    return ep.address().is_v4() && g_session->stream_peers.count(ep.address().to_v4().to_uint()) != 0;
+  };
   p.peers.erase(std::remove_if(p.peers.begin(), p.peers.end(), stream), p.peers.end());
   p.banned_peers.erase(std::remove_if(p.banned_peers.begin(), p.banned_peers.end(), stream), p.banned_peers.end());
 }
@@ -1011,7 +1018,6 @@ LT_API int lt_session_add_torrent_with_resume(
   if (ec) return -2;
   if (save_path && *save_path) atp.save_path = save_path;
   atp.flags |= lt::torrent_flags::no_verify_files;
-  drop_stream_peers(atp);
   auto const hid = id_for_hash(atp.info_hashes.get_best());
   lt::bdecode_node const kept = rd.dict_find_list(RESUME_WS_TRACKERS);
   for (int i = 0; kept && i < kept.list_size(); ++i) keep_ws_tracker(hid, kept.list_string_value_at(i));
@@ -1200,6 +1206,7 @@ LT_API int lt_torrent_add_channel_peer(std::uint32_t id, std::uint32_t ipv4, int
   auto t = h->native_handle();
   if (!t) return -1;
   lt::tcp::endpoint const ep(lt::address_v4(ipv4), static_cast<std::uint16_t>(port));
+  if (is_stream_address(ep.address())) g_session->stream_peers.insert(ipv4);
   boost::asio::post(*g_session->ioc, [t, ep] {
     lt::torrent_peer* p = t->add_peer(ep, lt::peer_info::tracker, lt::pex_flags_t{});
     if (p) p->supports_utp = false;

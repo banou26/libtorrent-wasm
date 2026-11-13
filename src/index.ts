@@ -394,7 +394,10 @@ export interface PeerInfo {
    * made up, it is not an address: `webrtc:` and a number no other peer of the session has.
    */
   endpoint: string
-  /** What carries the connection. `webrtc` is a peer handed over through {@link Session.addPeerStream}. */
+  /**
+   * What carries the connection. `webrtc` is a peer handed over through {@link Session.addPeerStream}:
+   * one the engine dialled inside 100.64.0.0/10. A peer that dialled in from there is `tcp` or `utp`.
+   */
   transport: 'tcp' | 'utp' | 'webrtc'
   /** Whatever the remote client calls itself. Arbitrary text from the network: never trust it. */
   client: string
@@ -1483,8 +1486,6 @@ export class Session {
   private observeReachability(message: string) {
     const incoming = INCOMING_RE.exec(message)
     if (incoming) {
-      // a stream address is not somebody who reached the announced port
-      if (streamIndex(incoming[1]!) >= 0) return
       const transport = incoming[2]!.toLowerCase()
       this.reachability.inbound++
       this.reachability.inboundByTransport[transport] = (this.reachability.inboundByTransport[transport] ?? 0) + 1
@@ -1538,7 +1539,9 @@ export class Session {
       const numPieces = view.getInt32(off, true); off += 4
       const requestsInFlight = view.getInt32(off, true); off += 4
       const failCount = view.getInt32(off, true); off += 4
-      const stream = streamIndex(endpoint)
+      // only a stream answers a dial into the range, so a peer the engine dialled there is one, and
+      // a peer that dialled in from there is an ordinary peer on a network that uses the range
+      const stream = flags & PEER_FLAG.localConnection ? streamIndex(endpoint) : -1
       peers.push({
         endpoint: stream < 0 ? endpoint : `webrtc:${stream}`,
         transport: stream >= 0 ? 'webrtc' : flags & PEER_FLAG.utpSocket ? 'utp' : 'tcp',

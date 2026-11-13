@@ -186,29 +186,34 @@ const sessionOver = (t, records, mod = {}) => {
   return session
 }
 
-test('a connection from a stream address is not counted as inbound', (t) => {
+test('a connection that came in from inside 100.64.0.0/10 is counted as inbound like any other', (t) => {
+  // a stream is dialled by the engine, so it never comes in: this is a peer on a network that uses the range
   const session = sessionOver(t, [
-    [TEXT_ALERT, Buffer.from('incoming connection from 100.64.3.9:6881 (TCP)')],
     [TEXT_ALERT, Buffer.from('incoming connection from 192.0.2.7:51413 (uTP)')],
+    [TEXT_ALERT, Buffer.from('incoming connection from 100.64.3.9:6881 (TCP)')],
   ])
   session.popAlerts()
   const reach = session.reachable()
-  assert.equal(reach.inbound, 1)
-  assert.deepEqual(reach.inboundByTransport, { utp: 1 })
-  assert.equal(reach.lastInbound.endpoint, '192.0.2.7:51413')
+  assert.equal(reach.inbound, 2)
+  assert.deepEqual(reach.inboundByTransport, { utp: 1, tcp: 1 })
+  assert.equal(reach.lastInbound.endpoint, '100.64.3.9:6881')
 })
 
-test('the peer list says what carries each peer, and hides an address only inside 100.64.0.0/10', (t) => {
+test('the peer list says what carries each peer, and hides an address only when the engine dialled it inside 100.64.0.0/10', (t) => {
   // a peer row as the wrapper writes it: endpoint, client, flags, then 60 bytes of counters
   const row = (endpoint, flags = 0) => Buffer.concat([str(endpoint), str('client'), u32(flags), Buffer.alloc(60)])
+  const DIALLED = PEER_FLAG.localConnection
   const rows = [
     row('192.0.2.7:51413'),
     row('198.51.100.9:6881', PEER_FLAG.utpSocket),
-    // the address before the range, its first, its last, and the address after it
-    row('100.63.255.255:6881'),
-    row('100.64.0.0:6881'),
-    row('100.127.255.255:6881'),
-    row('100.128.0.0:6881'),
+    // dialled by the engine: the address before the range, its first, its last, and the address after it
+    row('100.63.255.255:6881', DIALLED),
+    row('100.64.0.0:6881', DIALLED),
+    row('100.127.255.255:6881', DIALLED),
+    row('100.128.0.0:6881', DIALLED),
+    // peers that dialled in from inside the range
+    row('100.64.0.0:51413'),
+    row('100.127.255.255:6881', PEER_FLAG.utpSocket),
   ]
   const HANDLE = 7
   const session = sessionOver(t, [[REC_PEERS, Buffer.concat([u32(HANDLE), u32(rows.length), ...rows])]])
@@ -220,6 +225,8 @@ test('the peer list says what carries each peer, and hides an address only insid
     ['webrtc:0', 'webrtc'],
     ['webrtc:4194303', 'webrtc'],
     ['100.128.0.0:6881', 'tcp'],
+    ['100.64.0.0:51413', 'tcp'],
+    ['100.127.255.255:6881', 'utp'],
   ])
 })
 
