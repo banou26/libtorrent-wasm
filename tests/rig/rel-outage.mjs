@@ -64,8 +64,10 @@ const engine = async (name, host, options = {}) => {
   fs.mkdirSync(path.join(dir, 'dl'), { recursive: true })
   const session = await createSession({ net: host.net, dgram: host.dgram, dnsLookup, storage: new NodeFSStorage(dir), enableDht: false, ...options })
   const handles = new Set()
+  /** What the session said of its peers and its sockets, as { at, message }. */
+  const alerts = []
   const pump = setInterval(() => {
-    session.popAlerts()
+    for (const { message } of session.popAlerts()) if (/connect|error|reset|refused|listen|timed out/i.test(message)) alerts.push({ at: now(), message })
     for (const handle of handles) session.postStatus(handle)
   }, 250)
   closing.push(() => {
@@ -76,7 +78,7 @@ const engine = async (name, host, options = {}) => {
     for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (pass()) return
     throw new Error(`${name}: ${what} not within ${ms} ms`)
   }
-  return { session, dir, handles, until }
+  return { session, dir, handles, alerts, until }
 }
 
 /** A UDP socket bound through the relay. Rejects when the relay refuses the bind. */
@@ -312,7 +314,7 @@ const main = async () => {
   }
   console.log(JSON.stringify(summary, null, 2))
   const out = arg('json', null)
-  if (out) fs.writeFileSync(out, JSON.stringify({ summary, samples, binds: relay.binds }, null, 1))
+  if (out) fs.writeFileSync(out, JSON.stringify({ summary, samples, binds: relay.binds, alerts: ours.alerts, seedAlerts: utpSeed.alerts }, null, 1))
 }
 
 const finish = async (code) => {
