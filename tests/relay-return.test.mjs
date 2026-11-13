@@ -1,5 +1,6 @@
 // A relay that comes back after an outage: the download has to move again within seconds, on the
-// port the engine had. Two real engines on loopback, one of them behind a relay taken away for 22 s.
+// port the engine had. Two real engines on loopback, one of them behind a relay taken away for 22 s,
+// in one case for 14 s.
 //
 // Why 22 s: the seed is this engine, whose uTP resends back off to 21.0 s and then 38.2 s after its
 // last acknowledged packet, so a connection that is merely kept would not move again before 16 s
@@ -77,8 +78,8 @@ const swarm = async (t, behind) => {
   return { seeding, relayed, outage, resumed }
 }
 
-describe('a relay that comes back after 22 s', { concurrency: true }, () => {
-  it('a download behind it moves again within 10 s, on the port it had', async (t) => {
+describe('a relay that comes back after an outage', { concurrency: true }, () => {
+  it('a download behind it for 22 s moves again within 10 s, on the port it had', async (t) => {
     const { seeding, relayed, outage, resumed } = await swarm(t, 'leech')
     const returned = await outage(OUTAGE_MS)
     const { before } = returned
@@ -109,7 +110,7 @@ describe('a relay that comes back after 22 s', { concurrency: true }, () => {
   })
 
   // the leech dialled the seed over uTP, so the seed cannot dial it back and has to keep the connection
-  it('a seed behind it serves a peer that dialled in again within 10 s', async (t) => {
+  it('a seed behind it for 22 s serves a peer that dialled in again within 10 s', async (t) => {
     const { outage, resumed } = await swarm(t, 'seed')
     await resumed(await outage(OUTAGE_MS))
   })
@@ -124,7 +125,7 @@ describe('a relay that comes back after 22 s', { concurrency: true }, () => {
   })
 
   // two outages take 63 s, past the 60 s the suite gives a test
-  it('a download behind it moves again within 10 s of its return when it went away again 1 s after the first', { timeout: 120_000 }, async (t) => {
+  it('a download behind it for 22 s, and again 1 s after it came back, moves again within 10 s of its second return', { timeout: 120_000 }, async (t) => {
     const { relayed, outage, resumed } = await swarm(t, 'leech')
     const first = await outage(OUTAGE_MS)
     await relayed.next('both sockets back', (r) => r.at > first.back.restoreAt && r.listeners.every((l) => l.up), 16)
