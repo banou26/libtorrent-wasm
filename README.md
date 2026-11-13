@@ -668,6 +668,11 @@ Each of these was found by getting it wrong.
   `--manifest-path`.
 - **str0m refuses a message larger than its free send buffer**, which defaults to
   128 KiB, so the send buffer is never below the largest message (262144).
+- **A write str0m refuses waits for the next input.** The wrapper counts what the
+  stack holds and asks for no write there is no room for, but the stack also
+  counts the message that opens another channel, which cannot be measured from
+  outside. Asked again at once the write is refused for ever, in a loop that
+  never yields.
 - **str0m 0.25.0 takes an empty message and sends nothing**, and the channel then
   waits for ever on the sequence number it used up. `send` refuses one.
 - **Reading the buffered amount goes through `&mut Rtc`**, which the contract

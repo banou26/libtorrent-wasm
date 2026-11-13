@@ -318,7 +318,7 @@ class Connection {
   state: RTCPeerConnectionState = 'new'
   gathering: RTCIceGatheringState = 'new'
   readonly sctp = { maxMessageSize: MAX_MESSAGE_SIZE }
-  #operations: (() => void)[] = []
+  #operations: (() => unknown)[] = []
   #running = false
   #scheduled = false
   /** Milliseconds until the stack wants its next timeout, as of the last drain. */
@@ -338,16 +338,19 @@ class Connection {
     host.connections.add(this)
   }
 
-  run(operation?: () => void) {
+  run(operation?: () => unknown) {
     if (operation) this.#operations.push(operation)
     if (this.#running || !this.handle) return
     this.#running = true
     try {
+      // A write the stack refused is asked again after the next operation, never at once: nothing
+      // has changed in between, so it would be refused for ever, in a loop that never yields.
+      let refused = false
       for (;;) {
         const asked = this.#operations.shift()
-        const operation = asked ?? this.#next()
+        const operation: (() => unknown) | undefined = asked ?? (refused ? undefined : this.#next())
         if (!operation) break
-        operation()
+        refused = operation() === false
         this.#drain()
         if (!this.handle) return
         // an input may carry the peer's acknowledgements
@@ -368,7 +371,7 @@ class Connection {
    * As `run`, in a microtask. For what the caller asks from its own code, so that no event is
    * ever dispatched before the call that caused it has returned.
    */
-  schedule(operation?: () => void) {
+  schedule(operation?: () => unknown) {
     if (operation) this.#operations.push(operation)
     if (this.#scheduled) return
     this.#scheduled = true
@@ -451,9 +454,9 @@ class Connection {
   /**
    * What the connection does of its own accord once nothing is asked of it: hand the stack one
    * queued message it has room for, or close a channel that has sent everything. Undefined when
-   * there is none of that.
+   * there is none of that. The operation answers false when the stack refused the write.
    */
-  #next(): (() => void) | undefined {
+  #next(): (() => unknown) | undefined {
     const { x, sendBufferSize } = this.host
     // one send buffer for the whole connection
     let room = sendBufferSize
@@ -483,11 +486,10 @@ class Connection {
     const { x } = this.host
     const { length } = message.bytes
     const pointer = this.host.put(message.bytes)
-    if (!this.#check(x.rtc_write(this.handle, channel.index, Number(message.binary), pointer, length))) {
-      // the stack holds more than was measured: no write until an input has it measured again
-      channel.inStack = this.host.sendBufferSize
-      return
-    }
+    // The stack can refuse a write there was room for by the count in #next: it also counts the
+    // message that opens another channel, until the peer acknowledges it, and that one cannot
+    // be measured from here.
+    if (!this.#check(x.rtc_write(this.handle, channel.index, Number(message.binary), pointer, length))) return false
     channel.queue.shift()
     channel.queuedBytes -= length
     channel.inStack += length
@@ -531,7 +533,7 @@ class Connection {
    * A description went into the stack. Its ICE agent schedules nothing until it has been told the
    * time once, so every such change is followed by a timeout input.
    */
-  #describe(operation: () => void) {
+  #describe(operation: () => unknown) {
     this.run(operation)
     this.run(() => this.#check(this.host.x.rtc_timeout(this.handle)))
   }

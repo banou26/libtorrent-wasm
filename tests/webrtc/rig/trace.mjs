@@ -2,14 +2,15 @@
 // The module reaches the stack only through the exports of the instance WebAssembly.instantiate
 // gives it, so wrapping that one function sees everything.
 
+const decoder = new TextDecoder()
+
 /**
  * Runs `create`, which makes factories, and answers what it returned beside the calls of every
  * instance made meanwhile: { instance, name, result, args }, in order, for as long as they live.
  * A call that hands the stack a description also has `sdp`, the text as the stack was given it.
+ * `watch` is given each call as it returns, and what it throws is thrown into the module.
  */
-const decoder = new TextDecoder()
-
-export async function traced(create) {
+export async function traced(create, watch = () => {}) {
   const calls = []
   const instantiate = WebAssembly.instantiate
   let instances = 0
@@ -27,6 +28,7 @@ export async function traced(create) {
               if (name.startsWith('rtc_accept_')) call.sdp = decoder.decode(new Uint8Array(made.exports.memory.buffer, params[1], params[2]))
               call.result = value(...params)
               calls.push(call)
+              watch(call)
               return call.result
             }
     }

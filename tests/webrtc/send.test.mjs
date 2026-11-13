@@ -140,5 +140,39 @@ test('sendBufferSize is how much of a connection the stack may hold: up to it, a
     const held = calls.filter(({ name }) => name === 'rtc_buffered').reduce((most, { result }) => Math.max(most, result), 0)
     assert.ok(held <= sendBufferSize, `the stack held ${held} with a send buffer of ${sendBufferSize}`)
     assert.ok(held > sendBufferSize / 2, `the stack never held more than ${held} of a send buffer of ${sendBufferSize}`)
+    // the bound is the wrapper's own count: it asks for no write the stack has to refuse
+    const refused = calls.filter(({ name, result }) => name === 'rtc_write' && !result).length
+    assert.equal(refused, 0, `the stack refused ${refused} writes with a send buffer of ${sendBufferSize}`)
   }
+})
+
+test('a write the stack refuses is asked again after the next input, never at once, and nothing is lost', async (t) => {
+  // Counted, a little past the handful a run has: asked again at once, a refused write is
+  // refused for ever in a loop that never yields, which no test timeout can stop.
+  let refused = 0
+  const { result } = await traced(
+    () => open(t),
+    ({ name, result }) => {
+      if (name === 'rtc_write' && !result && ++refused > 50) throw new Error('the stack refused more than 50 writes: a refused write does not wait for room')
+    },
+  )
+  const { a, ours, theirs } = result
+  await settled(ours)
+  const failed = new Promise((_, reject) => ours.addEventListener('error', ({ error }) => reject(error), { once: true }))
+  const arriving = receive(theirs, 8 * 65536)
+
+  // The message that opens `second` sits in the stack until the peer acknowledges it, where the
+  // wrapper cannot measure it. So the fourth message fills the send buffer by the wrapper's
+  // count and overfills it by the stack's.
+  const second = a.createDataChannel('second')
+  const hash = createHash('sha256')
+  for (let i = 0; i < 8; i++) {
+    const message = new Uint8Array(65536).fill(i)
+    hash.update(message)
+    ours.send(message)
+  }
+  const arrived = await Promise.race([arriving, failed])
+  assert.ok(refused > 0, 'the stack refused no write, so this run proves nothing')
+  assert.deepEqual(arrived, { sha256: hash.digest('hex'), bytes: 8 * 65536, messages: 8 })
+  if (second.readyState !== 'open') await once(second, 'open')
 })
