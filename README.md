@@ -411,7 +411,7 @@ them once a second, and at once when `refresh()` is called:
 | `status(handle)` | whether the torrent runs (not paused, no error), whether it is checking, whether its metadata is known, the bytes still wanted and the payload this session moved. Null until a status was pumped: the torrent waits |
 | `isPrivate(handle)` | a private torrent is announced to its own trackers only, and so is one whose flag is not known yet |
 | `webSocketTrackers(handle)` | the torrent's own `ws` and `wss` trackers |
-| `hasStreamWindow(handle)` | a torrent somebody is reading is served before the others |
+| `hasStreamWindow(handle)` | a torrent somebody is reading is served before the others. A window planned with `deadlines: false`, a save, is not that |
 | `addPeerStream(handle, socket)` | hands libtorrent an open stream as a peer. When libtorrent gives a peer up it destroys the stream: one it had read and that never delivered a byte counts its remote as silent |
 | `peers(handle)` | only with `relay: true`: the torrent's ordinary peers, by `endpoint`. Asked every 10 s for each running torrent, and when a channel opens |
 

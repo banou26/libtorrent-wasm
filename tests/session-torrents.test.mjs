@@ -57,7 +57,7 @@ test('isPrivate() says what the metadata says, and nothing while there is none',
   assert.equal(session.isPrivate(77), undefined)
 })
 
-test('hasStreamWindow() is true from a window that was planned until it is cleared, replaced or the torrent goes', async (t) => {
+test('hasStreamWindow() is true from a window planned with deadlines until it is cleared, replaced or the torrent goes', async (t) => {
   const defer = teardown(t)
   const fx = fixture(defer, MiB)
   const { session, running } = await startEngine(defer, path.join(fx.root, 'engine'))
@@ -77,6 +77,14 @@ test('hasStreamWindow() is true from a window that was planned until it is clear
   window()
   session.prioritizeRange(handle, 0, 0, 1000)
   assert.equal(session.hasStreamWindow(handle), false, 'a range that replaced the window left it standing')
+
+  // a save: the priorities and the order of a window, and nobody waiting on a clock
+  const save = () => session.setStreamWindow(handle, [{ fileIndex: 0, offset: 0 }], { deadlines: false })
+  assert.equal(save(), true)
+  assert.equal(session.hasStreamWindow(handle), false, 'a save reads as somebody reading')
+  window()
+  save()
+  assert.equal(session.hasStreamWindow(handle), false, 'a save that replaced the window left it standing')
 
   window()
   session.removeTorrent(handle)

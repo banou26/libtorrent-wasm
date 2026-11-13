@@ -961,18 +961,22 @@ export class Session {
     // see `deadlines` for what a deadline costs when nothing is waiting on a clock
     if (opts.deadlines !== false) {
       for (const [piece, ms] of ladder) this.mod._lt_torrent_set_piece_deadline(handle, piece, ms, 0)
+      this.windows.add(handle)
+    } else {
+      this.windows.delete(handle)
     }
     // the clear above took the in-flight reads' deadlines with it
     this.reissueReadDeadlines(handle)
     if (opts.sequential !== false) this.setSequential(handle, true)
-    this.windows.add(handle)
     return true
   }
 
   /**
-   * Whether the torrent has a stream window: true from a {@link setStreamWindow} that planned one
-   * until {@link clearStreamWindow}, {@link prioritizeRange}, which replaces it, or the torrent's
-   * removal. It is how anything beside the caller learns that somebody is reading the torrent now.
+   * Whether somebody is reading the torrent now: true from a {@link setStreamWindow} that planned
+   * a window with deadlines until {@link clearStreamWindow}, {@link prioritizeRange} or a window
+   * planned with `deadlines: false`, each of which replaces it, or the torrent's removal. A window
+   * with no deadlines is a save, which nobody waits on. It is how anything beside the caller
+   * learns of a reader.
    */
   hasStreamWindow(handle: number): boolean { return this.windows.has(handle) }
 
