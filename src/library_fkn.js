@@ -102,8 +102,9 @@ addToLibrary({
      * So the number a caller reports as "your inbound port" stays true only for as long as these
      * sockets keep holding it, and after a dropped tunnel it can be a port nobody is bound to while
      * still being the number every tracker, PEX peer and DHT node has been given. Both reopens ask
-     * for that number again for exactly that reason, and only an outage past KEEP_PORT_MS makes
-     * them take whatever is free, which heals the socket while leaving the announce wrong.
+     * for that number again for exactly that reason, and only when somebody else holds it past
+     * KEEP_PORT_MS do they take whatever is free, which heals the socket while leaving the announce
+     * wrong.
      *
      * Reading this is what lets a caller tell those apart instead of showing a dead port with
      * confidence. It is a snapshot: nothing here is retained, and the fd table is the only source.
@@ -276,21 +277,28 @@ addToLibrary({
     LISTEN_REOPEN_DELAYS: [250, 1000, 2000],
 
     /**
-     * How long an outage may last while a reopen still asks for the port the fd first held, which is
-     * the one trackers, PEX, the DHT and the readout know. A relay that restarted frees it at once;
-     * one that lost our connection holds it for the old session until that session times out. Past
-     * this a reopen takes any free port, since the number may be somebody else's by then and a
-     * socket on the wrong port still beats none.
+     * How long an outage may last while a reopen asks for nothing but the port the fd first held,
+     * which is the one trackers, PEX, the DHT and the readout know. A relay that restarted frees it at
+     * once; one that lost our connection holds it for the old session until that session times out.
+     * Past this a refused bind to it is followed at once by one to any free port, since the number may
+     * be somebody else's by then and a socket on the wrong port still beats none, while a relay that
+     * comes back with it free still hands it back.
      */
     KEEP_PORT_MS: 60000,
 
+    // the port a reopen's bind asks for; past KEEP_PORT_MS, `anyPortNext` marks a bind to the home
+    // port whose refusal is followed at once by one to any port
     keepPort(st) {
-      return st.homePort && Date.now() - st.outageAt < FKN.KEEP_PORT_MS ? st.homePort : 0
+      if (!st.homePort) return 0
+      if (Date.now() - st.outageAt < FKN.KEEP_PORT_MS) return st.homePort
+      st.anyPortNext = !st.anyPortNext
+      return st.anyPortNext ? st.homePort : 0
     },
 
     // the delay before a reopen, logged only while it is still growing: past that the relay is simply
     // away, and a line every 2 s says nothing the first one did not
-    reopenDelay(delays, attempt, what, why) {
+    reopenDelay(st, delays, attempt, what, why) {
+      if (st.anyPortNext) return 0
       const delay = delays[Math.min(attempt - 1, delays.length - 1)]
       if (attempt <= delays.length) console.warn('[FKN] ' + what + ' ' + why + ', reopening in ' + delay + 'ms (attempt ' + attempt + ')')
       return delay
@@ -311,9 +319,9 @@ addToLibrary({
       if (st.closed || st.listenReopening || st.kind !== 'tcp-listen') return
       st.listening = false
       st.listenReopening = true
-      if (st.outageAt == null) st.outageAt = Date.now()
+      if (st.outageAt == null) { st.outageAt = Date.now(); st.anyPortNext = false }
       st.listenReopenAttempts = (st.listenReopenAttempts || 0) + 1
-      const delay = FKN.reopenDelay(FKN.LISTEN_REOPEN_DELAYS, st.listenReopenAttempts, 'tcp listener', why)
+      const delay = FKN.reopenDelay(st, FKN.LISTEN_REOPEN_DELAYS, st.listenReopenAttempts, 'tcp listener', why)
       setTimeout(() => {
         st.listenReopening = false
         if (st.closed || st.kind !== 'tcp-listen') return
@@ -430,12 +438,12 @@ addToLibrary({
       if (st.closed || st.reopening) return
       st.dead = true
       st.reopening = true
-      if (st.outageAt == null) st.outageAt = Date.now()
+      if (st.outageAt == null) { st.outageAt = Date.now(); st.anyPortNext = false }
       // the peers a heal cut wait for the next one that lasts
       clearTimeout(FKN.redialTimer)
       FKN.stats.udpReopen = (FKN.stats.udpReopen || 0) + 1
       st.reopenAttempts = (st.reopenAttempts || 0) + 1
-      const delay = FKN.reopenDelay(FKN.UDP_REOPEN_DELAYS, st.reopenAttempts, 'udp socket', why)
+      const delay = FKN.reopenDelay(st, FKN.UDP_REOPEN_DELAYS, st.reopenAttempts, 'udp socket', why)
       setTimeout(() => {
         st.reopening = false
         if (st.closed) return

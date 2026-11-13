@@ -275,8 +275,10 @@ test('a port somebody took is given up after KEEP_PORT_MS, and the next outage a
   const asked = relay.binds.slice(from)
   const moved = asked.findIndex((b) => b.port === 0)
   assert.ok(moved > 0, 'never took another port')
-  assert.ok(asked.slice(0, moved).every((b) => b.port === 6882 && b.at - lost < FKN.KEEP_PORT_MS), 'gave up the port too early')
-  assert.ok(asked[moved].at - lost >= FKN.KEEP_PORT_MS && asked[moved].at - lost <= FKN.KEEP_PORT_MS + 2000 + 30 + 2 * STEP)
+  assert.ok(asked.slice(0, moved).every((b) => b.port === 6882), 'asked for another port before it was refused the home one')
+  assert.ok(asked.slice(0, moved - 1).every((b) => b.at - lost < FKN.KEEP_PORT_MS), 'gave up the port too early')
+  assert.ok(asked[moved - 1].at - lost >= FKN.KEEP_PORT_MS && asked[moved - 1].at - lost <= FKN.KEEP_PORT_MS + 2000 + 30 + 2 * STEP)
+  assert.ok(asked[moved].at - asked[moved - 1].at <= 30 + 2 * STEP, 'any port was not asked for right after the home one was refused')
   assert.equal(st.localPort, 50000)
 
   relay.taken.clear()
@@ -284,6 +286,20 @@ test('a port somebody took is given up after KEEP_PORT_MS, and the next outage a
   for (let i = 0; i < 250 && !healed(); i++) t.mock.timers.tick(STEP)
   assert.equal(relay.binds.at(-1).port, 6882, 'the next outage did not ask for the published port')
   assert.equal(st.localPort, 6882)
+})
+
+test('a relay back after 90 s with the port free hands back the port the fd held', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
+  const relay = makeRelayDgram()
+  const { st, drop, healed } = relayUdpState(t, relay)
+
+  relay.away = true
+  drop()
+  advance(t, 90_000)
+  relay.away = false
+  for (let i = 0; i < 250 && !healed(); i++) t.mock.timers.tick(STEP)
+  assert.ok(healed(), 'not back 2.5 s after the relay')
+  assert.equal(st.localPort, 6882, 'a port nobody took was given up')
 })
 
 /** A socket on a relay that can be taken away, and the calls it makes into the engine, timed. */

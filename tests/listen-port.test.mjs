@@ -585,8 +585,10 @@ test('a listener whose port somebody took gives it up after KEEP_PORT_MS, and as
   const asked = net.listens.slice(from)
   const moved = asked.findIndex((l) => l.port === 0)
   assert.ok(moved > 0, 'never took another port')
-  assert.ok(asked.slice(0, moved).every((l) => l.port === home && l.at - lost < FKN.KEEP_PORT_MS), 'gave up the port too early')
-  assert.ok(asked[moved].at - lost >= FKN.KEEP_PORT_MS && asked[moved].at - lost <= FKN.KEEP_PORT_MS + 2000 + 30 + 2 * STEP)
+  assert.ok(asked.slice(0, moved).every((l) => l.port === home), 'asked for another port before it was refused the home one')
+  assert.ok(asked.slice(0, moved - 1).every((l) => l.at - lost < FKN.KEEP_PORT_MS), 'gave up the port too early')
+  assert.ok(asked[moved - 1].at - lost >= FKN.KEEP_PORT_MS && asked[moved - 1].at - lost <= FKN.KEEP_PORT_MS + 2000 + 30 + 2 * STEP)
+  assert.ok(asked[moved].at - asked[moved - 1].at <= 30 + 2 * STEP, 'any port was not asked for right after the home one was refused')
   assert.notEqual(st.localPort, home)
 
   net.taken.clear()
@@ -594,6 +596,21 @@ test('a listener whose port somebody took gives it up after KEEP_PORT_MS, and as
   for (let i = 0; i < 250 && !st.listening; i++) t.mock.timers.tick(STEP)
   assert.equal(net.listens.at(-1).port, home, 'the next outage did not ask for the published port')
   assert.equal(st.localPort, home)
+})
+
+test('a listener whose relay is back after 90 s with its port free is listening on that port again', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
+  const net = makeRelayNet()
+  const { st, drop } = relayListenFd(t, net)
+  const home = st.localPort
+
+  net.away = true
+  drop()
+  advance(t, 90_000)
+  net.away = false
+  for (let i = 0; i < 250 && !st.listening; i++) t.mock.timers.tick(STEP)
+  assert.ok(st.listening, 'the listener was not back 2.5 s after the relay')
+  assert.equal(st.localPort, home, 'a port nobody took was given up')
 })
 
 // ------------------------------------------------ what is actually bound, right now
