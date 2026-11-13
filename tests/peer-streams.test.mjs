@@ -222,3 +222,13 @@ test('the peer list says what carries each peer, and hides an address only insid
     ['100.128.0.0:6881', 'tcp'],
   ])
 })
+
+test('a stream answers one dial: a later dial of its address finds nothing', (t) => {
+  const fkn = {}
+  const session = sessionOver(t, [], { fkn, _lt_torrent_add_channel_peer: () => 0 })
+  const [ours] = streamPipe()
+  const { address } = session.addPeerStream(1, ours)
+  assert.equal(fkn.takeStream(address), ours)
+  // libtorrent dials a peer again about a minute after its stream closed
+  assert.equal(fkn.takeStream(address), undefined, 'a second dial was answered with a stream that had been handed over')
+})
