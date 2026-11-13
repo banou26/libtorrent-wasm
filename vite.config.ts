@@ -41,6 +41,9 @@ export default defineConfig({
       external: ['./libtorrent.js', '../dist/libtorrent.js'],
       output: {
         entryFileNames: '[name].js',
+        // A fixed name: `build` is never emptied and ships whole, so a name with a content hash would leave
+        // every earlier chunk in the package.
+        chunkFileNames: 'webtorrent/shared.js',
       },
     },
   },
