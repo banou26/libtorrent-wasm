@@ -1293,6 +1293,16 @@ export class Session {
     return this.readHash(handle, this.mod._lt_torrent_infohash_v2)
   }
 
+  /**
+   * Whether the torrent's metadata marks it private (BEP 27): its peers are to come from its own
+   * trackers and nowhere else. Undefined while the engine has no metadata to ask, which is every
+   * magnet until a peer has sent it, and every torrent until its add alert was pumped.
+   */
+  isPrivate(handle: number): boolean | undefined {
+    const answer = this.mod._lt_torrent_private(handle)
+    return answer < 0 ? undefined : answer === 1
+  }
+
   private readHash(handle: number, read: (handle: number, out: number) => number): string | null {
     const m = this.mod
     const ptr = m._malloc(65)

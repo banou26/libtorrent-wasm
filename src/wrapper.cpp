@@ -1054,6 +1054,18 @@ LT_API int lt_torrent_infohash_v2(std::uint32_t id, char* out) {
   return 0;
 }
 
+// 1 when the metadata marks the torrent private (BEP 27), 0 when it does not, -1 while there is no
+// metadata to ask. It reads the torrent itself, which nothing else touches between two ticks:
+// torrent_handle::torrent_file() is a sync_call and would never return.
+LT_API int lt_torrent_private(std::uint32_t id) {
+  if (!g_session) return -1;
+  auto* h = lookup_handle(id);
+  if (!h || !h->is_valid()) return -1;
+  auto t = h->native_handle();
+  if (!t || !t->valid_metadata()) return -1;
+  return t->torrent_file().priv() ? 1 : 0;
+}
+
 // set_sequential_download() is ABI-v1-only; the modern path is set/unset_flags(sequential_download)
 LT_API int lt_torrent_set_sequential(std::uint32_t id, int on) {
   if (!g_session) return -1;
