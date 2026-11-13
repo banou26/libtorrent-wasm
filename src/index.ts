@@ -590,6 +590,7 @@ export class Session {
   private streams = new Map<string, { socket: PeerStreamSocket, timer: ReturnType<typeof setTimeout> }>()
   // a random start, so a session does not hand out the addresses the one before it did
   private nextStream = Math.floor(Math.random() * STREAM_ADDRESSES)
+  private handles = new Set<number>()
 
   // `listeners` and `portOpen` are never stored: reachable() derives them from the shim on every
   // read, because they are the two fields that go stale on their own
@@ -623,7 +624,7 @@ export class Session {
     const magnetPtr = m.stringToNewUTF8(magnet)
     const pathPtr = m.stringToNewUTF8(savePath)
     try {
-      return m._lt_session_add_magnet(magnetPtr, pathPtr) >>> 0
+      return this.added(m._lt_session_add_magnet(magnetPtr, pathPtr))
     } finally {
       m._free(magnetPtr); m._free(pathPtr)
     }
@@ -635,7 +636,7 @@ export class Session {
     m.HEAPU8.set(buffer, ptr)
     const pathPtr = m.stringToNewUTF8(savePath)
     try {
-      return m._lt_session_add_torrent_file(ptr, buffer.length, pathPtr) >>> 0
+      return this.added(m._lt_session_add_torrent_file(ptr, buffer.length, pathPtr))
     } finally {
       m._free(ptr); m._free(pathPtr)
     }
@@ -647,16 +648,31 @@ export class Session {
     m.HEAPU8.set(resume, ptr)
     const pathPtr = m.stringToNewUTF8(savePath)
     try {
-      return m._lt_session_add_torrent_with_resume(ptr, resume.length, pathPtr) >>> 0
+      return this.added(m._lt_session_add_torrent_with_resume(ptr, resume.length, pathPtr))
     } finally {
       m._free(ptr); m._free(pathPtr)
     }
   }
 
+  // the wrapper answers a negative number for a source it could not read, which is no handle
+  private added(id: number): number {
+    if (id > 0) this.handles.add(id)
+    return id >>> 0
+  }
+
+  /**
+   * The handle of every torrent the session holds: each one an add returned, until it is removed.
+   *
+   * A handle is listed from the call that added it, which is before the engine can say anything
+   * about the torrent: {@link status} and {@link infohash} answer null until alerts were pumped.
+   */
+  torrents(): number[] { return [...this.handles] }
+
   removeTorrent(handle: number, deleteFiles = false) {
     this.mod._lt_session_remove_torrent_ex(handle, deleteFiles ? 1 : 0)
     // before the bitfield goes, or a parked read can never be satisfied and never rejected either
     this.failPieceWaiters(new Error(`read: torrent ${handle} was removed`), handle)
+    this.handles.delete(handle)
     this.filesByHandle.delete(handle)
     this.bitfieldByHandle.delete(handle)
     this.statusByHandle.delete(handle)
