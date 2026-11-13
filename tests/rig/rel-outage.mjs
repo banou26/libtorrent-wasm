@@ -4,8 +4,8 @@
 // move again. Everything is on loopback: the uTP seed at 127.0.0.1, the WebRTC seed at 127.0.0.3.
 //
 //   node tests/rig/rel-outage.mjs [--mode rebuild|keep|none] [--remote entry|libdatachannel]
-//                                 [--outage MS] [--moved] [--same-port] [--at FRACTION] [--watch MS]
-//                                 [--size MB] [--up KBPS] [--json out.json] [--dir DIR]
+//                                 [--outage MS] [--moved] [--same-port] [--queued] [--at FRACTION]
+//                                 [--watch MS] [--size MB] [--up KBPS] [--json out.json] [--dir DIR]
 //
 // --mode says what is done with the WebRTC half when its socket ends:
 //   rebuild  the swarm and the factory are closed, and made again on a new socket once the relay gives one
@@ -15,6 +15,9 @@
 //   none     nothing: the factory ends with its socket
 // --remote is the WebRTC seed's stack: this package's entry, or libdatachannel (a port for each connection,
 // as a browser and qBittorrent have). --moved brings the relay back with the ports its sockets held taken.
+// --queued has this end send into the outage, 1 s after the relay went (the requests of every piece are
+// cancelled), so the uTP seed misses packets of ours and the FIN of the engine's cut waits behind them: the
+// case in which only the reset of that cut ends the seed's side before the engine dials again.
 // --dir is where the run keeps its files, a directory of its own in the system's temporary one by default.
 // It is removed when the run ends, also when the run is stopped.
 
@@ -41,6 +44,7 @@ const REMOTE = arg('remote', 'entry')
 const OUTAGE_MS = Number(arg('outage', 20_000))
 const MOVED = process.argv.includes('--moved')
 const SAME_PORT = process.argv.includes('--same-port')
+const QUEUED = process.argv.includes('--queued')
 const AT = Number(arg('at', 0.15))
 const WATCH_MS = Number(arg('watch', 40_000))
 const SIZE_MB = Number(arg('size', 32))
@@ -48,6 +52,7 @@ const UP_KBPS = Number(arg('up', 256))
 
 const TRACKER = 'wss://tracker.test/'
 const OURS = '127.0.0.1'
+const UTP_SEED = '127.0.0.1'
 const RTC_SEED = '127.0.0.3'
 const REBIND_EVERY_MS = 500
 const wasm = new WebAssembly.Module(fs.readFileSync(new URL('../../build/webrtc.wasm', import.meta.url)))
@@ -176,9 +181,21 @@ const main = async () => {
   // our session, behind the relay
   const relay = createRelayHost()
   closing.push(() => relay.close())
+  // What this end's uTP says to the uTP seed (BEP 29: the type in the high nibble of byte 0, the connection
+  // id at 2, seq_nr at 16, ack_nr at 18): the last packet before the drop, then whatever the connection of
+  // that packet still sends once the relay is back, and each SYN.
+  const utp = { beforeDrop: null, afterRestore: [] }
+  let dropped = false
+  relay.onSend = (bytes, address, port) => {
+    if (address !== UTP_SEED || port !== utpPort || bytes.length < 20 || (bytes[0] & 0x0f) !== 1) return
+    const view = new DataView(bytes.buffer, bytes.byteOffset, 20)
+    const header = { at: now(), type: bytes[0] >> 4, id: view.getUint16(2), seq: view.getUint16(16), ack: view.getUint16(18) }
+    if (!dropped) utp.beforeDrop = header
+    else if (header.id === utp.beforeDrop.id || header.type === 4) utp.afterRestore.push(header)
+  }
   const ours = await engine('ours', relay)
   const { session } = ours
-  const handle = session.addMagnet(`${magnetFor(meta.infoHash, meta.name, [{ host: '127.0.0.1', port: utpPort }])}&tr=${encodeURIComponent(TRACKER)}`, '/dl')
+  const handle = session.addMagnet(`${magnetFor(meta.infoHash, meta.name, [{ host: UTP_SEED, port: utpPort }])}&tr=${encodeURIComponent(TRACKER)}`, '/dl')
   ours.handles.add(handle)
 
   // the tracker socket goes through the relay too: it ends with the relay, and fails to open while it is away
@@ -276,8 +293,14 @@ const main = async () => {
   await ours.until('both kinds of peer delivering', () => delivered.utp > 0 && delivered.webrtc > 0, 60_000)
   await ours.until(`${AT} of the file`, () => samples.at(-1)?.done >= AT * size, 120_000)
   const dropAt = now()
+  dropped = true
   relay.drop()
   for (const socket of throughRelay) socket.close()
+  if (QUEUED) {
+    setTimeout(() => {
+      for (let piece = 0; piece < meta.pieces; piece++) session.cancelPieceRequests(handle, piece)
+    }, Math.min(1_000, OUTAGE_MS / 2))
+  }
   await sleep(OUTAGE_MS)
   await relay.restore({ portsTaken: MOVED })
   const restoreAt = now()
@@ -295,12 +318,22 @@ const main = async () => {
     return last ? last.at - dropAt : 0
   }
   const before = samples.findLast((x) => x.at <= dropAt)
+  // a state packet (type 2) carries the number of the connection's next packet, any other its own
+  const nextAtDrop = (utp.beforeDrop.seq + (utp.beforeDrop.type === 2 ? 0 : 1)) & 0xffff
+  const reset = utp.afterRestore.find((sent) => sent.type === 3) ?? null
+  const redial = utp.afterRestore.find((sent) => sent.type === 4) ?? null
   const summary = {
-    mode: MODE, remote: REMOTE, outageMs: OUTAGE_MS, moved: MOVED, samePort: SAME_PORT,
+    mode: MODE, remote: REMOTE, outageMs: OUTAGE_MS, moved: MOVED, samePort: SAME_PORT, queued: QUEUED,
     dropAt, restoreAt,
     webrtcAgainAfterRestoreMs: again('webrtc'),
     utpAgainAfterRestoreMs: again('utp'),
     webrtcLastBytesAfterDropMs: lastBytes('webrtc'),
+    // The reset of the engine's cut, and how far past the connection's next packet it was numbered. A
+    // libtorrent remote drops one numbered past its reorder window, which starts at the last packet it got
+    // and is 16 packets or longer: 0, or a little under 65536, is taken.
+    utpReset: reset,
+    utpResetAhead: reset ? (reset.seq - nextAtDrop) & 0xffff : null,
+    utpRedialAfterRestoreMs: redial ? redial.at - restoreAt : null,
     // the channel that carried bytes before the drop is the one that carries them after it
     sameChannel: before.kinds.filter((kind) => kind.startsWith('webrtc')).some((kind) => samples.at(-1).kinds.includes(kind)),
     channelsBefore: before.kinds.filter((kind) => kind.startsWith('webrtc')),
@@ -316,7 +349,7 @@ const main = async () => {
   }
   console.log(JSON.stringify(summary, null, 2))
   const out = arg('json', null)
-  if (out) fs.writeFileSync(out, JSON.stringify({ summary, samples, binds: relay.binds, alerts: ours.alerts, seedAlerts: utpSeed.alerts }, null, 1))
+  if (out) fs.writeFileSync(out, JSON.stringify({ summary, samples, binds: relay.binds, alerts: ours.alerts, seedAlerts: utpSeed.alerts, utp }, null, 1))
 }
 
 let finishing = false
