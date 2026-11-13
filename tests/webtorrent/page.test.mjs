@@ -233,7 +233,7 @@ test('the page keeps no reference to a connection whose link ended, however it e
     'the worker closed it while open': async () => (await opened()).ours.close(),
     'the remote closed it': async () => (await opened()).theirs.close(),
     'the worker closed it before it opened': async () => (await links.offer()).link.close(),
-    'it could not be made': () => links.answer('v=0\r\na=fake:999999\r\n').catch(() => {}),
+    'it could not be made': () => assert.rejects(within('the refusal', links.answer('v=0\r\na=fake:999999\r\n')), /no such description/),
   }
   for (const [name, end] of Object.entries(endings)) {
     ending = name
@@ -258,15 +258,15 @@ test('the page keeps no reference to a connection whose link ended, however it e
 
 test('a constructor the browser refuses reaches the worker as LinksFull', async t => {
   const { links } = half(t, fakeRtc({ capacity: 0 }))
-  await assert.rejects(links.offer(), LinksFull)
-  await assert.rejects(links.answer('v=0\r\na=fake:1\r\n'), LinksFull)
+  await assert.rejects(within('the refusal of an offer', links.offer()), LinksFull)
+  await assert.rejects(within('the refusal of an answer', links.answer('v=0\r\na=fake:1\r\n')), LinksFull)
 })
 
 test('a request the page refused is over for the worker: no flush follows it and none of its timers is left', async t => {
   const timers = () => process.getActiveResourcesInfo().filter(kind => kind === 'Timeout').length
   const before = timers()
   const { links, worker } = half(t, fakeRtc({ capacity: 0 }))
-  await assert.rejects(links.offer(), LinksFull)
+  await assert.rejects(within('the refusal', links.offer()), LinksFull)
   await settle()
   assert.deepEqual(worker.said, { offer: 1 })
   assert.equal(timers(), before)
