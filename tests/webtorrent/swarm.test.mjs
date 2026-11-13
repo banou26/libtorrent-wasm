@@ -669,6 +669,20 @@ test('a torrent that is not running is not announced, and one that stops says so
   assert.equal(r.tracker.announces(hashOf(2)).at(-2).event, 'started')
 })
 
+test('a torrent paused and resumed before the tracker has answered the pause still offers after the resume', async t => {
+  const r = rig(t)
+  r.tracker.phantoms = { complete: 1, incomplete: 0 }
+  // Another torrent keeps the tracker socket, so the reply to `stopped` comes back on it after `started` went out.
+  await r.start(2, { left: 0 })
+  await r.start(1)
+  assert.equal(r.offered(1).length, 1)
+  r.session.pause(1)
+  r.session.resume(1)
+  await settle()
+  assert.deepEqual(r.tracker.announces(hashOf(1)).slice(-3).map(message => message.event), ['stopped', 'started', undefined])
+  assert.equal(r.offered(1).length, 2, 'the count that left us out is not the one the offers follow')
+})
+
 test('a torrent paused by the queue, with no event, is noticed within a beat', async t => {
   const r = rig(t)
   await r.start(1)

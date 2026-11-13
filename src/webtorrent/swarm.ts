@@ -115,8 +115,8 @@ type Announcing = {
   tracker: Tracker
   /** Whether the socket, as it is connected now, has heard of the torrent. */
   started: boolean
-  /** The next reply is the count the offers follow. */
-  counting: boolean
+  /** The last announce has had no offer round yet: one follows the first reply that leaves somebody to offer to. */
+  offersDue: boolean
   sentAt: number
   nextAt: number
   intervalMs: number
@@ -153,6 +153,9 @@ type Torrent = {
   completed: boolean
   lastPeerAt: number | null
 }
+
+/** The last announce has had neither a reply nor a refusal yet. */
+const unanswered = (announcing: Announcing): boolean => (announcing.answeredAt ?? 0) < announcing.sentAt
 
 const seeding = (view: SwarmTorrent): boolean => view.hasMetadata && view.left <= 0
 
@@ -316,12 +319,17 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     }
   }
 
-  /** As many offers as the tracker's count leaves somebody to answer, none from a seeding torrent. */
+  /**
+   * As many offers as the tracker's count leaves somebody to answer, none from a seeding torrent. A count that
+   * leaves nobody keeps the round due: after a pause and a resume inside the tracker's round trip the first
+   * reply is the one to `stopped`, which counts the swarm without us.
+   */
   const offerRound = async (t: Torrent, announcing: Announcing) => {
     if (seeding(t.view)) return
     const others = (announcing.seeders ?? 0) + (announcing.leechers ?? 0) - 1
     const count = Math.min(OFFERS_PER_ANNOUNCE, room(t), others - t.conns.size)
     if (count < 1) return
+    announcing.offersDue = false
     const made = await Promise.all(Array.from({ length: count }, () => offer(t)))
     const ready = made.filter(offered => offered !== null).filter(({ conn }) => t.conns.has(conn))
     if (!ready.length) return
@@ -409,18 +417,15 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       announcing.answeredAt = Date.now()
       announcing.failure = null
       changed()
-      if (!announcing.counting) return
-      announcing.counting = false
-      void offerRound(t, announcing)
+      if (announcing.offersDue) void offerRound(t, announcing)
     }
     tracker.onfailure = (infoHash, reason) => {
       for (const t of torrents.values()) {
         const announcing = t.announcing.get(url)
         // A refusal that names no torrent is about whichever announce still waits for its reply.
-        if (!announcing || (infoHash === null ? !announcing.counting : infoHash !== t.hash)) continue
+        if (!announcing || (infoHash === null ? !unanswered(announcing) : infoHash !== t.hash)) continue
         announcing.failure = reason
         announcing.answeredAt = Date.now()
-        announcing.counting = false
         changed()
       }
     }
@@ -437,7 +442,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
         if (now < announcing.nextAt || !announcing.tracker.connected) continue
         announcing.tracker.announce({ ...identity(t), event: announcing.started ? undefined : 'started', offers: [] })
         announcing.started = true
-        announcing.counting = true
+        announcing.offersDue = true
         announcing.sentAt = now
         announcing.nextAt = now + announcing.intervalMs
       }
@@ -483,7 +488,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     for (const url of wanted) {
       if (t.announcing.has(url)) continue
       t.announcing.set(url, {
-        tracker: trackerAt(url), started: false, counting: false, sentAt: 0, nextAt: 0, intervalMs: ANNOUNCE_MS,
+        tracker: trackerAt(url), started: false, offersDue: false, sentAt: 0, nextAt: 0, intervalMs: ANNOUNCE_MS,
         seeders: null, leechers: null, answeredAt: null, failure: null,
       })
       changed()
