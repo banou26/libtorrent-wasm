@@ -42,6 +42,8 @@ export class Stream implements PeerStream {
   private held: Uint8Array[] | null = []
   private heldBytes = 0
   private ended: Error | boolean = false
+  private heard = false
+  private destroyed = false
 
   constructor(private readonly sink: StreamSink) {}
 
@@ -67,6 +69,14 @@ export class Stream implements PeerStream {
     return this.listeners.get(event)?.length ?? 0
   }
 
+  /**
+   * Its reader ended it and the remote had never sent a byte. A libtorrent 2.1 peer that will not talk to this
+   * address opens the channel, says nothing and never closes it, so this is all that shows of it.
+   */
+  get silent(): boolean {
+    return this.destroyed && !this.heard && this.listenerCount('data') > 0
+  }
+
   write(bytes: Uint8Array): boolean {
     return this.ended ? true : this.sink.write(bytes)
   }
@@ -74,6 +84,7 @@ export class Stream implements PeerStream {
   destroy() {
     if (this.ended) return
     this.ended = true
+    this.destroyed = true
     this.held = null
     this.sink.close()
   }
@@ -81,6 +92,7 @@ export class Stream implements PeerStream {
   /** Bytes from the remote. */
   push(bytes: Uint8Array) {
     if (this.ended) return
+    this.heard = true
     if (!this.held) return this.emit('data', bytes)
     this.heldBytes += bytes.length
     if (this.heldBytes > MAX_HELD) {

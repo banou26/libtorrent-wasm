@@ -60,6 +60,11 @@ const UNANSWERED_MS = 50_000
 const OPENING_MS = 30_000
 const UNDIALLED_MS = 10_000
 const QUIET_AFTER_CLOSE_MS = 60_000
+// A libtorrent 2.1 peer refuses for as long as it lists our address, which outlasts a session. Each new try
+// costs a connection and a peer slot for the 11 s its silence takes to show.
+const QUIET_AFTER_SILENCE_MS = 600_000
+/** Remotes one torrent leaves alone at a time. Past it the oldest is forgotten. */
+const MAX_QUIET = 200
 const QUIET_AFTER_FULL_MS = 60_000
 /** Between announces until the tracker names its interval. */
 const ANNOUNCE_MS = 120_000
@@ -94,6 +99,11 @@ export type TorrentPeers = {
   pending: number
   open: number
   lastPeerAt: number | null
+  /**
+   * Remotes whose channel opened and that never sent a byte, in the last ten minutes: peers that will not talk
+   * to this address, which is not the same as nobody being there.
+   */
+  silent: number
 }
 
 export type Snapshot = {
@@ -137,18 +147,33 @@ type Conn = {
   deadline: number
   link?: Link
   socket?: Stream
+  /** Where the open channel comes from. Only read with `relay`. */
+  address?: string
 }
 
-type Torrent = {
+/** A remote one torrent leaves alone. */
+type Quiet = {
+  until: number
+  /** It never sent a byte: its answers to our offers are refused too, not only its offers. */
+  silent: boolean
+  /** Where its silent channel came from, with `relay`: a channel from there under another id is closed. */
+  address?: string
+}
+
+/** What is kept of a torrent for as long as the session has it, across a pause. */
+type Memory = {
+  /** The torrent's tracker id: one for the whole session. */
+  peerId: string
+  quiet: Map<string, Quiet>
+}
+
+type Torrent = Memory & {
   handle: number
   hash: string
-  peerId: string
   view: SwarmTorrent
   announcing: Map<string, Announcing>
   conns: Set<Conn>
   offers: Map<string, Conn>
-  /** Remotes whose offers are not answered, and until when. */
-  quiet: Map<string, number>
   leeching: boolean
   completed: boolean
   lastPeerAt: number | null
@@ -173,6 +198,14 @@ const oursStands = (ourId: string, theirId: string): boolean => ourId < theirId
 
 const addressOf = (endpoint: string): string => endpoint.replace(/:\d+$/, '').replace(/^\[|\]$/g, '')
 
+/** Forgets the oldest entries past `max`. A Map keeps the order its keys were added in. */
+const trim = (kept: Map<string, unknown>, max: number) => {
+  for (const key of kept.keys()) {
+    if (kept.size <= max) return
+    kept.delete(key)
+  }
+}
+
 /**
  * Finds WebRTC peers for every running torrent of a session through WebSocket trackers, and hands each open
  * data channel to libtorrent as a peer.
@@ -189,7 +222,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
   const trackers = new Map<string, Tracker>()
   const torrents = new Map<number, Torrent>()
   const byHash = new Map<string, Torrent>()
-  const ids = new Map<number, string>()
+  const memories = new Map<number, Memory>()
   let live = 0
   let tokens = limits.perMinute
   let refilledAt = Date.now()
@@ -243,12 +276,26 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     return conn
   }
 
+  /**
+   * Leaves the remote of an attempt that ended alone for a while: for ten minutes, and its answers too, when
+   * the engine ended its stream without a byte from it having arrived.
+   */
+  const quieten = (t: Torrent, remote: string, conn: Conn) => {
+    const silent = conn.socket?.silent ?? false
+    t.quiet.set(remote, {
+      until: Date.now() + (silent ? QUIET_AFTER_SILENCE_MS : QUIET_AFTER_CLOSE_MS),
+      silent,
+      address: silent ? conn.address : undefined,
+    })
+    trim(t.quiet, MAX_QUIET)
+  }
+
   const remove = (conn: Conn): boolean => {
     const t = conn.torrent
     if (!t.conns.delete(conn)) return false
     live--
     t.offers.delete(conn.offerId)
-    if (conn.remote) t.quiet.set(conn.remote, Date.now() + QUIET_AFTER_CLOSE_MS)
+    if (conn.remote) quieten(t, conn.remote, conn)
     changed()
     return true
   }
@@ -276,14 +323,13 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
 
   const opened = async (conn: Conn, socket: Stream) => {
     const t = conn.torrent
-    if (relay && session.peers) {
-      const address = links.remoteAddress(conn.link!)
-      if (address) {
-        // libtorrent keeps one connection per address, and a libtorrent 2.1 remote refuses the channel anyway.
-        const ordinary = await session.peers(t.handle).catch(() => [])
-        if (!t.conns.has(conn)) return
-        if (ordinary.some(peer => addressOf(peer.endpoint) === address)) return drop(conn)
-      }
+    const address = conn.address = relay ? links.remoteAddress(conn.link!) : undefined
+    if (address) {
+      // libtorrent keeps one connection per address, and a libtorrent 2.1 remote refuses the channel anyway.
+      const ordinary = (await session.peers?.(t.handle).catch(() => [])) ?? []
+      if (!t.conns.has(conn)) return
+      if (ordinary.some(peer => addressOf(peer.endpoint) === address)) return drop(conn)
+      for (const quiet of t.quiet.values()) if (quiet.address === address) return drop(conn)
     }
     if (!conn.remote || !session.torrent(t.handle)?.running) return drop(conn)
     try {
@@ -374,6 +420,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     const t = byHash.get(infoHash)
     const conn = t?.offers.get(id)
     if (!t || !conn || conn.state !== 'offered' || remote === t.peerId) return
+    if (t.quiet.get(remote)?.silent) return drop(conn)
     const same = [...t.conns].filter(other => other.remote === remote)
     // An open channel wins and an earlier answer of theirs stands. Otherwise we answered an offer of theirs.
     if (same.some(other => other.state === 'open' || other.ours)) return drop(conn)
@@ -465,18 +512,17 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
   const reconcile = (handle: number) => {
     const view = session.torrent(handle)
     let t = torrents.get(handle)
-    if (!view) ids.delete(handle)
+    if (!view) memories.delete(handle)
     if (!view?.running) {
       if (t) stop(t)
       return
     }
     if (!t) {
-      // One id per torrent for the whole session, kept across a pause.
-      const id = ids.get(handle) ?? peerId()
-      ids.set(handle, id)
+      const memory = memories.get(handle) ?? { peerId: peerId(), quiet: new Map() }
+      memories.set(handle, memory)
       t = {
-        handle, view, hash: binaryHash(view.infoHash), peerId: id, announcing: new Map(), conns: new Set(),
-        offers: new Map(), quiet: new Map(), leeching: false, completed: false, lastPeerAt: null,
+        ...memory, handle, view, hash: binaryHash(view.infoHash), announcing: new Map(), conns: new Set(),
+        offers: new Map(), leeching: false, completed: false, lastPeerAt: null,
       }
       torrents.set(handle, t)
       byHash.set(t.hash, t)
@@ -528,7 +574,11 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
         if (conn.state === 'open' && conn.socket!.listenerCount('data')) conn.deadline = Infinity
         else drop(conn)
       }
-      for (const [remote, until] of t.quiet) if (now >= until) t.quiet.delete(remote)
+      for (const [remote, { until, silent }] of t.quiet) {
+        if (now < until) continue
+        t.quiet.delete(remote)
+        if (silent) changed()
+      }
     }
     prune()
     announce()
@@ -557,6 +607,8 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       torrents: [...torrents.values()].map(t => {
         let open = 0
         for (const conn of t.conns) if (conn.state === 'open') open++
+        let silent = 0
+        for (const quiet of t.quiet.values()) if (quiet.silent) silent++
         return {
           handle: t.handle,
           trackers: [...t.announcing].map(([url, { tracker, seeders, leechers, answeredAt, failure }]) =>
@@ -564,6 +616,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
           pending: t.conns.size - open,
           open,
           lastPeerAt: t.lastPeerAt,
+          silent,
         }
       }),
     }),

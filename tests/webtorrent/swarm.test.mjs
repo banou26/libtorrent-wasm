@@ -514,7 +514,7 @@ test('a remote whose channel closed is not answered for 60 s', async t => {
   await r.start(1)
   const remote = new Remote(r)
   assert.equal(await remote.connect(1), true)
-  r.session.streams[0].socket.destroy()
+  remote.sockets[0].destroy()
   await settle()
   assert.equal(r.peers.snapshot().torrents[0].open, 0)
 
@@ -522,6 +522,138 @@ test('a remote whose channel closed is not answered for 60 s', async t => {
   assert.equal(await remote.connect(1), false)
   await advance(t, 2 * SECOND, SECOND)
   assert.equal(await remote.connect(1), true)
+})
+
+/** The engine gives a stream up, as libtorrent does one whose remote never sent its handshake. */
+const giveUp = async stream => {
+  stream.socket.destroy()
+  await settle()
+}
+
+/** The connection of ours that made an offer we announced. */
+const ourEnd = (r, offer) => r.rtc.all.find(pc => pc.id === Number(/a=fake:(\d+)/.exec(offer.offer.sdp)[1]))
+
+test('a remote that never sent a byte before the engine gave its stream up is left alone for ten minutes, and counted', async t => {
+  const r = rig(t)
+  r.tracker.phantoms = { complete: 1, incomplete: 0 }
+  await r.start(1)
+  const remote = new Remote(r)
+  assert.equal(await remote.connect(1), true)
+  await advance(t, 11 * SECOND, SECOND)
+  await giveUp(r.session.streams[0])
+  const silent = () => r.peers.snapshot().torrents[0].silent
+  assert.equal(silent(), 1)
+
+  // Past the 60 s any ended attempt costs, and on to the next announce, which leaves an offer of ours waiting.
+  await advance(t, 110 * SECOND, SECOND)
+  assert.equal(await remote.connect(1), false, 'its offer is not answered')
+  const [offer] = r.offered(1).at(-1).offers
+  assert.equal(ourEnd(r, offer).closed, false)
+  await remote.answer(1, offer)
+  assert.equal(r.session.streams.length, 1, 'its answer to an offer of ours is not taken')
+  assert.equal(ourEnd(r, offer).closed, true, 'and our end of that offer is closed by us')
+  assert.equal(r.live(), 0)
+
+  await advance(t, 488 * SECOND, SECOND)
+  assert.equal(await remote.connect(1), false, 'not at 609 s either')
+  assert.equal(silent(), 1)
+  let changes = 0
+  r.peers.onchange = () => changes++
+  await advance(t, SECOND, SECOND)
+  assert.deepEqual([silent(), changes], [1, 0])
+  await advance(t, SECOND, SECOND)
+  assert.deepEqual([silent(), changes], [0, 1], 'ten minutes after the stream was given up it is forgotten, and onchange says so')
+  assert.equal(await remote.connect(1), true)
+})
+
+test('a remote that sent even one byte is never counted silent, nor one whose stream nothing dialled, nor one that closed its own channel', async t => {
+  const r = rig(t)
+  await r.start(1)
+  const spoke = new Remote(r)
+  assert.equal(await spoke.connect(1), true)
+  spoke.sockets[0].write(Buffer.of(19))
+  await settle()
+  assert.equal(Buffer.concat(r.session.streams[0].bytes).length, 1)
+  await giveUp(r.session.streams[0])
+
+  // The engine's own deadline ends a stream libtorrent never dialled: that says nothing about the remote.
+  r.session.dials = false
+  const undialled = new Remote(r)
+  assert.equal(await undialled.connect(1), true)
+  await giveUp(r.session.streams[1])
+  r.session.dials = true
+
+  const left = new Remote(r)
+  assert.equal(await left.connect(1), true)
+  left.sockets[0].destroy()
+  await settle()
+
+  assert.deepEqual([r.peers.snapshot().torrents[0].silent, r.live()], [0, 0])
+  await advance(t, 61 * SECOND, SECOND)
+  for (const remote of [spoke, undialled, left]) assert.equal(await remote.connect(1), true, 'each is answered again after the 60 s')
+})
+
+test('a silent remote is still left alone after its torrent was paused and resumed', async t => {
+  const r = rig(t)
+  await r.start(1)
+  const remote = new Remote(r)
+  assert.equal(await remote.connect(1), true)
+  await giveUp(r.session.streams[0])
+  r.session.pause(1)
+  await settle()
+  r.session.resume(1)
+  await settle()
+  assert.equal(r.peers.snapshot().torrents[0].silent, 1)
+  await advance(t, 61 * SECOND, SECOND)
+  assert.equal(await remote.connect(1), false)
+})
+
+test('a torrent leaves at most 200 remotes alone at a time, and forgets the oldest first', async t => {
+  const BOUND = 200
+  const r = rig(t, { limits: { perMinute: 1_000_000 } })
+  await r.start(1)
+  const remotes = []
+  // Counted, and it stops at the first count over the bound: with the bound gone this fails, it does not grow.
+  for (let i = 0; i < BOUND + 10; i++) {
+    remotes.push(new Remote(r))
+    assert.equal(await remotes[i].connect(1), true, `remote ${i} connected`)
+    await giveUp(r.session.streams[i])
+    const held = r.peers.snapshot().torrents[0].silent
+    assert.ok(held <= BOUND, `${held} remotes are remembered after ${i + 1} went silent: the bound is ${BOUND}`)
+  }
+  assert.equal(r.peers.snapshot().torrents[0].silent, BOUND)
+  assert.equal(await remotes[BOUND + 9].connect(1), false, 'the newest is still left alone')
+  assert.equal(await remotes[0].connect(1), true, 'the oldest was forgotten to make room')
+})
+
+test('with the relay flag the address a silent remote came from is left alone too, under any id', async t => {
+  const from = (r, address) => {
+    const remote = new Remote(r)
+    remote.links = rtcLinks({ RTCPeerConnection: fakeRtc({ address }) })
+    return remote
+  }
+  const r = rig(t, { relay: true })
+  await r.start(1)
+  assert.equal(await from(r, '198.51.100.7').connect(1), true)
+  await giveUp(r.session.streams[0])
+  const again = from(r, '198.51.100.7')
+  await again.connect(1)
+  assert.equal(r.session.streams.length, 1, 'another id from that address gets no stream')
+  assert.equal(again.closes, 1)
+  const left = from(r, '198.51.100.8')
+  assert.equal(await left.connect(1), true)
+  assert.equal(r.session.streams.length, 2, 'another address does')
+  left.sockets[0].destroy()
+  await settle()
+  assert.equal(await from(r, '198.51.100.8').connect(1), true)
+  assert.equal(r.session.streams.length, 3, 'and an address whose remote closed its own channel is not kept')
+
+  const plain = rig(t)
+  await plain.start(1)
+  assert.equal(await from(plain, '198.51.100.7').connect(1), true)
+  await giveUp(plain.session.streams[0])
+  assert.equal(await from(plain, '198.51.100.7').connect(1), true)
+  assert.equal(plain.session.streams.length, 2, 'without the flag no address is kept')
 })
 
 test('an open channel is handed to the session, and closed when the session refuses it', async t => {
@@ -814,7 +946,7 @@ test('the snapshot says what each tracker last answered, what is pending and ope
     torrents: [{
       handle: 1,
       trackers: [{ url: TRACKER, connected: true, seeders: 0, leechers: 1, answeredAt: NOW, failure: null }],
-      pending: 0, open: 0, lastPeerAt: null,
+      pending: 0, open: 0, lastPeerAt: null, silent: 0,
     }],
   })
   assert.ok(changes > 0)
