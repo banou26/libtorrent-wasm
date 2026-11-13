@@ -1,0 +1,18 @@
+Subject: [PATCH] perf: acknowledge after 20 ms instead of 200
+
+---
+diff --git a/src/association/timer.rs b/src/association/timer.rs
+index 41de471..52f6cf0 100644
+--- a/src/association/timer.rs
++++ b/src/association/timer.rs
+@@ -3,7 +3,9 @@ use std::time::Instant;
+ 
+ use crate::config::{RTO_INITIAL, RTO_MAX, RTO_MIN};
+ 
+-pub(crate) const ACK_INTERVAL: u64 = 200;
++// Not upstream, which has 200, the default of RFC 4960. libdatachannel sets its own to 20, and a
++// libdatachannel sender behind a round trip of 50 ms was several times slower against 200.
++pub(crate) const ACK_INTERVAL: u64 = 20;
+ const TIMER_COUNT: usize = 6;
+ 
+ #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
