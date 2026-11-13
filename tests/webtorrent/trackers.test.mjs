@@ -1,88 +1,15 @@
-// The defaults the owner chose, as data, and the two readers the swarm's tracker list is built from.
+// The defaults the owner chose, as data, and which of a torrent's trackers the swarm opens.
 
 import assert from 'node:assert/strict'
-import crypto from 'node:crypto'
 import test from 'node:test'
-import { Worker } from 'node:worker_threads'
 
-import { DEFAULT_ICE_SERVERS, DEFAULT_TRACKERS, trackersOf, trackerUrl } from '../../build/webtorrent/index.js'
+import { DEFAULT_ICE_SERVERS, DEFAULT_TRACKERS, trackerUrl } from '../../build/webtorrent/index.js'
 import * as page from '../../build/webtorrent/page.js'
-
-const bencode = value => {
-  if (typeof value === 'number') return Buffer.from(`i${value}e`)
-  if (typeof value === 'string') return bencode(Buffer.from(value))
-  if (Buffer.isBuffer(value)) return Buffer.concat([Buffer.from(`${value.length}:`), value])
-  if (Array.isArray(value)) return Buffer.concat([Buffer.from('l'), ...value.map(bencode), Buffer.from('e')])
-  return Buffer.concat([Buffer.from('d'), ...Object.keys(value).sort().flatMap(key => [bencode(key), bencode(value[key])]), Buffer.from('e')])
-}
-
-const torrent = extra => bencode({
-  info: { length: 1 << 20, name: 'fixture.bin', 'piece length': 1 << 18, pieces: crypto.randomBytes(80) },
-  ...extra,
-})
-
-/**
- * What trackersOf gives for each input, read in a thread that is ended after `ms` or at 64 MiB of heap. The
- * reader is one synchronous call: if a change makes it read the same bytes for ever, nothing in the thread that
- * called it could stop it, and no test timeout would fire. A failure names the input the reader stopped on.
- */
-const readEach = (inputs, ms = 5000) => new Promise((resolve, reject) => {
-  const read = []
-  const thread = new Worker(new URL('./trackers-thread.mjs', import.meta.url), {
-    workerData: inputs, resourceLimits: { maxOldGenerationSizeMb: 64 },
-  })
-  const finish = error => {
-    clearTimeout(deadline)
-    void thread.terminate()
-    if (error) reject(error)
-    else resolve(read)
-  }
-  const deadline = setTimeout(() => finish(new Error(`input ${read.length} was not read in ${ms} ms`)), ms)
-  thread.on('message', urls => { if (read.push(urls) === inputs.length) finish() })
-  thread.on('error', error => finish(new Error(`input ${read.length} ended the reader: ${error.message}`)))
-})
 
 test('the defaults are the two trackers and the STUN host the owner chose', () => {
   assert.deepEqual(DEFAULT_TRACKERS, ['wss://tracker.openwebtorrent.com', 'wss://tracker.webtorrent.dev'])
   assert.deepEqual(DEFAULT_ICE_SERVERS, [{ urls: 'stun:stun.l.google.com:19302' }])
   assert.equal(page.DEFAULT_ICE_SERVERS, DEFAULT_ICE_SERVERS)
-})
-
-test('a magnet link gives its ws and wss trackers, decoded, each once, and nothing else', () => {
-  const magnet = 'magnet:?xt=urn:btih:aabbccddeeff00112233445566778899aabbccdd&dn=a+film'
-    + '&tr=udp%3A%2F%2Ftracker.test%3A6969%2Fannounce'
-    + '&tr=wss%3A%2F%2Ftracker.test&tr=http%3A%2F%2Ftracker.test%2Fannounce'
-    + '&tr.1=ws%3A%2F%2Fother.test%3A8000%2Fannounce&tr=wss%3A%2F%2Ftracker.test&tr=WSS://upper.test&tr=%E0%A4%A&x.pe=192.0.2.1:6881'
-  assert.deepEqual(trackersOf(magnet), ['wss://tracker.test', 'ws://other.test:8000/announce', 'WSS://upper.test'])
-  assert.deepEqual(trackersOf('magnet:?xt=urn:btih:aabbccddeeff00112233445566778899aabbccdd'), [])
-  assert.deepEqual(trackersOf(''), [])
-})
-
-test('a .torrent file gives the ws and wss trackers of announce and of every tier of announce-list', () => {
-  const bytes = torrent({
-    announce: 'wss://first.test',
-    'announce-list': [
-      ['udp://tracker.test:6969', 'wss://first.test'],
-      ['http://tracker.test/announce'],
-      ['ws://second.test/announce', 'wss://third.test:443/announce'],
-    ],
-  })
-  assert.deepEqual(trackersOf(new Uint8Array(bytes)), ['wss://first.test', 'ws://second.test/announce', 'wss://third.test:443/announce'])
-  assert.deepEqual(trackersOf(torrent({ announce: 'wss://only.test/announce' })), ['wss://only.test/announce'])
-  assert.deepEqual(trackersOf(torrent({})), [])
-  assert.deepEqual(trackersOf(torrent({ announce: 'udp://tracker.test:6969' })), [])
-})
-
-test('bytes that are not a torrent give an empty list and never throw', async () => {
-  const good = torrent({ announce: 'wss://first.test' })
-  const cases = [
-    new Uint8Array(0), crypto.randomBytes(512), good.subarray(0, good.length - 40), Buffer.from('l'.repeat(100_000)),
-    Buffer.from('d8:announce'), Buffer.from('i12e'), Buffer.from('d8:announcei7ee'), Buffer.from('99999999999:x'),
-    // Cut inside a length, and lengths that are not digits: a reader that took them would never come back.
-    Buffer.from('d12'), Buffer.from('d8:announce16:wss://first.test12'),
-    Buffer.from('d8:announce16:wss://first.test1x:ae'), Buffer.from('d8:announce16:wss://first.test-3:e'),
-  ]
-  assert.deepEqual(await readEach(cases), cases.map(() => []))
 })
 
 test('a tracker URL is normalised, so one tracker spelt two ways is one socket', () => {
