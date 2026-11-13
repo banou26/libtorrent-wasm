@@ -47,9 +47,10 @@ const whole = (bytes: Uint8Array): ArrayBuffer =>
 /**
  * The page half: makes the browser's peer connections for the engine worker and carries their bytes.
  *
- * It holds no timer, no limit and no knowledge of torrents: a page that is hidden runs its timers late, so
- * every decision is the worker's. It drops every reference to a connection when its link closes. Returns the
- * function that closes every link and stops listening.
+ * It holds no limit and no knowledge of torrents, and its one timer is the `CLOSE_AFTER_STEP_MS` a connection
+ * is kept before it is closed: a page that is hidden runs its timers late, so every decision is the worker's,
+ * and a late timer only closes a connection later. It drops every reference to a connection once its link
+ * ended and that timer ran. Returns the function that closes every link and stops listening.
  */
 export const servePeerLinks = (port: PortLike, options: RtcLinksOptions): (() => void) => {
   const links = rtcLinks(options)

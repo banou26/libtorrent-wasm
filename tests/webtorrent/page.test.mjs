@@ -204,11 +204,8 @@ test('close crosses the port in both directions, and a closed link leaves nothin
   second.a.socket.destroy()
   await until('both ends heard', () => second.a.closes === 1 && second.b.closes === 1)
 
-  await settle()
-  for (const pc of Class.all) {
-    assert.equal(pc.closed, true)
-    assert.deepEqual(handlersOf(pc), [])
-  }
+  await reached('every connection closed', () => Class.all.every(pc => pc.closed))
+  for (const pc of Class.all) assert.deepEqual(handlersOf(pc), [])
 })
 
 test('the page keeps no reference to a connection whose link ended, however it ended: each can be collected', async t => {
@@ -240,6 +237,8 @@ test('the page keeps no reference to a connection whose link ended, however it e
     await end()
     await settle(40)
   }
+  // A connection is kept for a few milliseconds after its link ended, by the timer that closes it.
+  await reached('every connection closed', () => [...Class.all, ...Remote.all].every(pc => pc.closed))
   ending = 'held on purpose'
   const held = new Watched({ iceServers: [] })
 
@@ -294,14 +293,39 @@ test('stopping the page half closes every link it made', async t => {
   const { b } = await pair(one.links, half(t, Class).links)
   one.stop()
   await until('the remote heard', () => b.closes === 1)
-  assert.equal(Class.all.filter(pc => !pc.closed).length, 0)
+  await reached('every connection closed', () => Class.all.every(pc => pc.closed))
+})
+
+test('the page half keeps a connection 5 ms after its last signalling step too, when the worker closes a link or the page half is stopped', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+  const Class = fakeRtc()
+  const [one, two] = [half(t, Class), half(t, Class)]
+  const none = () => Class.all.every(pc => !pc.closed)
+  const endings = { 'a close from the worker': link => link.close(), 'stopping the page half': () => one.stop() }
+  for (const [name, end] of Object.entries(endings)) {
+    const { a, b } = await pair(one.links, two.links)
+    end(a.link)
+    await until('the remote heard', () => b.closes === 1)
+    assert.ok(none(), `${name}: no connection is closed in the task its link ended in`)
+    t.mock.timers.tick(4)
+    await settle()
+    assert.ok(none(), `${name}: nor 4 ms later`)
+    t.mock.timers.tick(1)
+    await until(`${name}: both connections closed at 5 ms`, () => Class.all.every(pc => pc.closed))
+    Class.all.length = 0
+  }
+  assert.equal(Class.stats.early, 0)
 })
 
 test('an attempt still waiting to be read is ended by a close from the worker, and by stopping the page half', async t => {
-  // No timer runs, so the worker never says flush, and these connections never report gathering complete.
-  t.mock.timers.enable({ apis: ['setTimeout'] })
+  // No timer runs by itself, so the worker never says flush, and these connections never report gathering
+  // complete. An attempt that ended closes its connection 5 ms later, which the check lets pass.
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
   const Class = fakeRtc({ gathering: {} })
-  const waiting = () => Class.all.filter(pc => pc.localDescription && !pc.closed).length
+  const waiting = () => {
+    t.mock.timers.tick(5)
+    return Class.all.filter(pc => pc.localDescription && !pc.closed).length
+  }
 
   const { port1, port2 } = new MessageChannel()
   t.after(() => {
@@ -319,6 +343,7 @@ test('an attempt still waiting to be read is ended by a close from the worker, a
   await until('the page waits again', () => waiting() === 1)
   one.stop()
   await until('the stop ended it', () => waiting() === 0)
+  assert.equal(Class.stats.early, 0)
 })
 
 test('the page says when gathering completes, so the worker waits for no timer', async t => {
@@ -365,7 +390,10 @@ test('a flush that reaches the page before its connection can be waited on is ke
   catchUp()
   await reached('the offer', () => made !== null)
   made.link.close()
-  await reached('the page closed its connection', () => Late.all.every(pc => pc.closed))
+  await reached('the page closed its connection', () => {
+    t.mock.timers.tick(5)
+    return Late.all.every(pc => pc.closed)
+  })
 })
 
 test('the gathering cap is the worker’s: a page with no timers still answers, 3 s after the request', async t => {
@@ -417,7 +445,10 @@ test('the gathering cap is the worker’s: a page with no timers still answers, 
   answer.link.onclose = () => closes++
   await reached('the close', () => closes === 1, 10_000)
 
+  // The page's timers run at last. The only ones it asked for are the 5 ms before a connection is closed.
+  thread.postMessage({ late: true })
   thread.postMessage({ report: true })
-  const report = await said()
-  assert.deepEqual(report, { timers: [], made: 2, open: 0, handlers: 0 })
+  const { timers, ...report } = await said()
+  assert.deepEqual(report, { made: 2, open: 0, handlers: 0 })
+  assert.deepEqual(timers.filter(ms => ms !== 5), [], 'no other timer was asked for in the page half')
 })

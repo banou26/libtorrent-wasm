@@ -11,6 +11,8 @@ import { advance, binary, fakeRtc, fakeWebSocket, FakeSession, hashOf, settle, T
 const NOW = 1_700_000_000_000
 const TRACKER = 'wss://tracker.test/'
 const SECOND = 1000
+/** How long a connection is kept after its last signalling step before it is closed. */
+const CLOSING = 5
 
 const mocked = new WeakSet()
 
@@ -25,6 +27,7 @@ const rig = (t, { rtc = fakeRtc(), more = {}, defaults = [TRACKER], ...options }
     links: rtcLinks({ RTCPeerConnection: rtc }), WebSocket, trackers: defaults ?? undefined, ...options,
   })
   t.after(() => peers.close())
+  t.after(() => assert.equal(rtc.stats.early, 0, 'a connection was closed during a signalling step, or sooner than 5 ms after one'))
   const self = {
     t, tracker, WebSocket, rtc, session, peers,
     socket: (of = tracker) => [...of.sockets][0],
@@ -70,16 +73,25 @@ let remotes = 0
 class Remote {
   sockets = []
   closes = 0
+  /** Its links that opened and have not closed. */
+  opened = new Set()
 
-  constructor(rig, prefix = '-XX0001-') {
+  /** Its connections are the rig's class unless it is given one of its own. */
+  constructor(rig, prefix = '-XX0001-', rtc = rig.rtc) {
     this.rig = rig
     this.id = prefix + String(remotes++).padStart(12, '0')
-    this.links = rtcLinks({ RTCPeerConnection: rig.rtc })
+    this.links = rtcLinks({ RTCPeerConnection: rtc })
   }
 
   watch(link) {
-    link.onopen = socket => this.sockets.push(socket)
-    link.onclose = () => this.closes++
+    link.onopen = socket => {
+      this.sockets.push(socket)
+      this.opened.add(link)
+    }
+    link.onclose = () => {
+      this.closes++
+      this.opened.delete(link)
+    }
     return link
   }
 
@@ -269,6 +281,7 @@ test('an attempt whose description never comes is given up after 10 s, and close
   assert.equal(r.live(), 0)
   gate.open()
   await settle()
+  await advance(t, CLOSING)
   assert.equal(r.rtc.stats.made, 2)
   assert.equal(r.open(), 0)
   assert.equal(r.offered(1).length, 0)
@@ -282,6 +295,7 @@ test('a torrent that stops while its offers are being made announces none of the
   r.session.pause(1)
   gate.open()
   await settle()
+  await advance(t, CLOSING)
   assert.equal(r.offered(1).length, 0)
   assert.equal(r.open(), 0)
 })
@@ -296,6 +310,7 @@ test('offers and answers that cannot be sent because the socket went are closed,
   await settle()
   gate.open()
   await settle()
+  await advance(t, CLOSING)
   assert.equal(r.live(), 0)
   assert.equal(r.open(), 1, 'only the remote’s own connection is left')
 })
@@ -306,6 +321,7 @@ test('an answer the connection refuses closes that attempt', async t => {
   await r.start(1)
   new Remote(r).relay(1, r.offered(1)[0].offers[0].offer_id, { answer: { type: 'answer', sdp: 'v=0\r\na=fake:999999\r\n' } })
   await settle()
+  await advance(t, CLOSING)
   assert.equal(r.live(), 0)
   assert.equal(r.open(), 0)
 })
@@ -472,11 +488,19 @@ test('an offer of a remote that is being answered stands against its later one, 
 })
 
 for (const [prefix, kept] of [['-AA0001-', 'theirs'], ['-ZZ0001-', 'ours']]) {
+  /** What must hold once both attempts met: `answering` is the remote's end of our offer, `theirs` of its own. */
+  const oneLeft = (r, remote, answering, theirs) => {
+    assert.equal(r.session.streamsOf(1).length, 1, 'exactly one channel reached libtorrent')
+    assert.equal(r.peers.snapshot().torrents[0].pending, 0)
+    assert.deepEqual([remote.opened.has(theirs), remote.opened.has(answering)], [kept === 'theirs', kept === 'ours'], 'the attempt that goes on is the smaller id’s offer')
+    assert.equal(r.open(), 1, 'and the other one’s connection is closed at our end: the remote, like a libtorrent 2.1 peer, closes nothing')
+  }
+
   test(`of our offer and a remote's, both pending, the one from the smaller id is kept: ${kept} against ${prefix}`, async t => {
     const r = rig(t)
     r.tracker.phantoms = { complete: 1, incomplete: 0 }
     await r.start(1)
-    const remote = new Remote(r, prefix)
+    const remote = new Remote(r, prefix, fakeRtc())
     const [offer] = r.offered(1)[0].offers
     // The remote answers our offer and, before either end opens, its own offer arrives.
     const theirs = await remote.links.offer()
@@ -487,25 +511,23 @@ for (const [prefix, kept] of [['-AA0001-', 'theirs'], ['-ZZ0001-', 'ours']]) {
     remote.watch(theirs.link)
     await settle()
     const answered = await remote.accept({ link: theirs.link, offerId: 'their-offer'.padEnd(20, '.') })
-    await settle()
+    await advance(t, CLOSING)
     assert.equal(answered, kept === 'theirs')
-    assert.equal(r.session.streamsOf(1).length, 1, 'exactly one channel reached libtorrent')
-    assert.equal(remote.sockets.length, 1)
-    assert.equal(r.peers.snapshot().torrents[0].pending, 0)
+    oneLeft(r, remote, answering.link, theirs.link)
   })
 
   test(`and the same when the remote's offer came first: ${kept} against ${prefix}`, async t => {
     const r = rig(t)
     r.tracker.phantoms = { complete: 1, incomplete: 0 }
     await r.start(1)
-    const remote = new Remote(r, prefix)
+    const remote = new Remote(r, prefix, fakeRtc())
     const [offer] = r.offered(1)[0].offers
     const theirs = await remote.offer(1)
-    await remote.answer(1, offer)
-    assert.equal(await remote.accept(theirs), kept === 'theirs', 'the attempt that goes on is the smaller id’s offer')
-    assert.equal(r.session.streamsOf(1).length, 1, 'exactly one channel reached libtorrent')
-    assert.equal(remote.sockets.length, 1)
-    assert.equal(r.peers.snapshot().torrents[0].pending, 0)
+    const answering = await remote.answer(1, offer)
+    // The remote is not told which attempt we dropped, and goes on with both.
+    assert.equal(await remote.accept(theirs), true)
+    await advance(t, CLOSING)
+    oneLeft(r, remote, answering, theirs.link)
   })
 }
 
@@ -627,11 +649,7 @@ test('a torrent leaves at most 200 remotes alone at a time, and forgets the olde
 })
 
 /** A scripted peer whose channels come from that address. */
-const from = (r, address) => {
-  const remote = new Remote(r)
-  remote.links = rtcLinks({ RTCPeerConnection: fakeRtc({ address }) })
-  return remote
-}
+const from = (r, address) => new Remote(r, undefined, fakeRtc({ address }))
 
 test('with the relay flag the address a silent remote came from is left alone too, under any id', async t => {
   const r = rig(t, { relay: true })
@@ -867,6 +885,7 @@ test('a torrent that is not running is not announced, and one that stops says so
   assert.equal(await remote.connect(2), true)
   r.session.pause(2)
   await settle()
+  await advance(t, CLOSING)
   assert.equal(r.tracker.announces(hashOf(2)).at(-1).event, 'stopped')
   assert.equal(r.open(), 0, 'its offers and its channel are closed')
   assert.equal(remote.closes, 1)
@@ -1093,6 +1112,7 @@ test('close says stopped everywhere, closes every connection and socket, and not
   r.peers.onchange = () => changes++
   r.peers.close()
   await settle()
+  await advance(t, CLOSING)
   assert.equal(r.tracker.announces().at(-1).event, 'stopped')
   assert.equal(r.tracker.sockets.size, 0)
   assert.equal(r.open(), 0)

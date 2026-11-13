@@ -6,7 +6,7 @@ import crypto from 'node:crypto'
 import test from 'node:test'
 
 import { LinksFull, rtcLinks } from '../../build/webtorrent/index.js'
-import { advance, fakeRtc, handlersOf, pair, reading, settle, turn, until, within, writeAll } from './fakes.mjs'
+import { advance, fakeRtc, handlersOf, pair, reached, reading, settle, turn, until, within, writeAll } from './fakes.mjs'
 
 const KIB = 1024
 const MIB = 1024 * KIB
@@ -197,10 +197,8 @@ test('close() ends both ends, tells the remote, and is silent toward its own cal
   assert.equal(a.closes, 0)
   assert.equal(b.closes, 1)
   assert.equal(a.socket.write(Buffer.from('late')), true, 'a write after the end is taken and dropped')
-  for (const pc of Class.all) {
-    assert.equal(pc.closed, true)
-    assert.deepEqual(handlersOf(pc), [], 'a closed link holds no handler on its connection')
-  }
+  for (const pc of Class.all) assert.deepEqual(handlersOf(pc), [], 'a closed link holds no handler on its connection')
+  await reached('both connections closed', () => Class.all.every(pc => pc.closed))
 })
 
 test('destroy() on the stream closes the link and says so, since the swarm has to hear of it', async () => {
@@ -269,14 +267,153 @@ test('an offer the class refuses rejects answer(), and the attempt leaves no con
   const Class = fakeRtc()
   await assert.rejects(rtcLinks({ RTCPeerConnection: Class }).answer('v=0\r\na=fake:999999\r\n'), /no such description/)
   const [pc] = Class.all
-  assert.equal(pc.closed, true)
   assert.deepEqual(handlersOf(pc), [])
+  await reached('the connection closed', () => pc.closed)
 })
 
-test('a constructor that throws is LinksFull, for an offer and for an answer', async () => {
-  const links = rtcLinks({ RTCPeerConnection: fakeRtc({ capacity: 0 }) })
-  await assert.rejects(links.offer(), LinksFull)
-  await assert.rejects(links.answer('v=0\r\na=fake:1\r\n'), LinksFull)
+test('a constructor that throws, whatever it throws, is LinksFull, for an offer and for an answer', async () => {
+  const Typed = class { constructor() { throw new TypeError('not a constructor here') } }
+  for (const RTCPeerConnection of [fakeRtc({ capacity: 0 }), Typed]) {
+    const links = rtcLinks({ RTCPeerConnection })
+    await assert.rejects(links.offer(), LinksFull)
+    await assert.rejects(links.answer('v=0\r\na=fake:1\r\n'), LinksFull)
+  }
+})
+
+const NOW = 1_700_000_000_000
+
+/** The timers and the clock under the case's hand: the in-memory class reads the clock the links read. */
+const clocked = t => t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: NOW })
+
+/** How long after its last signalling step each connection was closed, null for one still open. */
+const closedAfter = Class => Class.all.map(pc => pc.closed ? pc.closedAt - pc.steppedAt : null)
+
+const REFUSED = 'v=0\r\na=fake:999999\r\n'
+
+// Each ends one or two links in the same millisecond as their last signalling step.
+const ENDINGS = {
+  'close() on an offer nobody answered': async links => (await links.offer()).link.close(),
+  'an offer the class refuses': links => links.answer(REFUSED).catch(() => {}),
+  'an answer the class refuses': async links => (await links.offer()).link.accept(REFUSED).catch(() => {}),
+  'close() on an open link, and the remote’s close at the other end': async links => (await pair(links)).a.link.close(),
+  'the reader destroying its stream': async links => (await pair(links)).a.socket.destroy(),
+  'the connection failing': async (links, Class) => {
+    await pair(links)
+    Class.all[0].connectionState = 'failed'
+    Class.all[0].onconnectionstatechange({})
+  },
+  'the channel reporting an error': async (links, Class) => {
+    await pair(links)
+    Class.all[0].channel.onerror({})
+  },
+  'a message that is not bytes': async (links, Class) => {
+    await pair(links)
+    Class.all[0].channel.send('text')
+  },
+}
+
+for (const [name, end] of Object.entries(ENDINGS)) {
+  test(`a connection is closed 5 ms after its last signalling step and no sooner, when its link ends by ${name}`, async t => {
+    clocked(t)
+    const Class = fakeRtc()
+    await end(rtcLinks({ RTCPeerConnection: Class }), Class)
+    await settle()
+    const none = Class.all.map(() => null)
+    assert.deepEqual(closedAfter(Class), none, 'not in the task its link ended in')
+    t.mock.timers.tick(4)
+    await settle()
+    assert.deepEqual(closedAfter(Class), none, 'not 4 ms later')
+    t.mock.timers.tick(1)
+    await settle()
+    assert.deepEqual(closedAfter(Class), Class.all.map(() => 5))
+    assert.equal(Class.stats.early, 0)
+  })
+}
+
+// Each step takes 6 ms here, so the step before the failing one is more than 5 ms old when the link ends:
+// what counts is the step that failed.
+const FAILING = [
+  ['offer', 'createOffer'], ['offer', 'setLocalDescription'],
+  ['answer', 'setRemoteDescription'], ['answer', 'createAnswer'], ['answer', 'setLocalDescription'],
+  ['accept', 'setRemoteDescription'],
+]
+
+for (const [call, fails] of FAILING) {
+  test(`${call}() whose ${fails} fails closes its connection 5 ms after that step settled`, async t => {
+    clocked(t)
+    const Class = fakeRtc({ stepMs: 6, fails })
+    const links = rtcLinks({ RTCPeerConnection: Class })
+    const remote = rtcLinks({ RTCPeerConnection: fakeRtc() })
+    let rejected = false
+    const refused = () => { rejected = true }
+    if (call === 'answer') links.answer((await remote.offer()).sdp).catch(refused)
+    else {
+      const made = links.offer()
+      made.catch(refused)
+      if (call === 'accept') {
+        await advance(t, 12, 1)
+        const { sdp, link } = await made
+        link.accept((await remote.answer(sdp)).sdp).catch(refused)
+      }
+    }
+    const [pc] = Class.all
+    // Counted: 40 ms is more than any of these takes, and a connection that never closes fails the case below.
+    for (let ms = 0; ms < 40 && !pc.closed; ms++) await advance(t, 1, 1)
+    assert.equal(rejected, true)
+    assert.deepEqual(closedAfter(Class), [5])
+    assert.equal(Class.stats.early, 0)
+  })
+}
+
+test('a link that ends more than 5 ms after its last signalling step closes its connection at once', async t => {
+  clocked(t)
+  const Class = fakeRtc()
+  const links = rtcLinks({ RTCPeerConnection: Class })
+  const [first, second] = [await links.offer(), await links.offer()]
+  t.mock.timers.tick(5)
+  first.link.close()
+  assert.deepEqual(closedAfter(Class), [null, null], 'at 5 ms it still waits')
+  t.mock.timers.tick(1)
+  second.link.close()
+  assert.deepEqual(closedAfter(Class), [null, 6])
+  t.mock.timers.tick(4)
+  assert.deepEqual(closedAfter(Class), [10, 6])
+  assert.equal(Class.stats.early, 0)
+})
+
+test('a link closed while a signalling step is in flight closes its connection 5 ms after that step settled', async t => {
+  clocked(t)
+  const Class = fakeRtc({ stepMs: 3 })
+  let offer = null
+  rtcLinks({ RTCPeerConnection: Class }).offer().then(made => { offer = made })
+  await advance(t, 6, 1)
+  await settle()
+  const answer = await rtcLinks({ RTCPeerConnection: fakeRtc() }).answer(offer.sdp)
+  const [pc] = Class.all
+
+  // Applying the answer takes 3 ms, and the link is closed 1 ms into it.
+  offer.link.accept(answer.sdp).catch(() => {})
+  await advance(t, 1, 1)
+  assert.equal(pc.stepping, 1)
+  offer.link.close()
+  await advance(t, 6, 1)
+  assert.equal(pc.closed, false, 'not while the step was in flight, and not 4 ms after it settled')
+  await advance(t, 1, 1)
+  assert.deepEqual(closedAfter(Class), [5])
+  assert.equal(Class.stats.early, 0)
+})
+
+test('accept() on a closed link rejects and takes no signalling step, so the close keeps its time', async t => {
+  clocked(t)
+  const Class = fakeRtc()
+  const offer = await rtcLinks({ RTCPeerConnection: Class }).offer()
+  const answer = await rtcLinks({ RTCPeerConnection: fakeRtc() }).answer(offer.sdp)
+  offer.link.close()
+  t.mock.timers.tick(3)
+  await assert.rejects(offer.link.accept(answer.sdp), /the link is closed/)
+  t.mock.timers.tick(2)
+  assert.deepEqual(closedAfter(Class), [5])
+  assert.equal(Class.stats.early, 0)
 })
 
 test('the remote address is the selected pair’s where the class has one, else undefined', async () => {

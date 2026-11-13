@@ -9,9 +9,16 @@ export const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }]
 export const REFLEXIVE_GRACE_MS = 300
 export const GATHER_CAP_MS = 3000
 
+// Chromium 156 schedules a connection's state events one task ahead, and a connection closed while one is
+// scheduled keeps one of the page's 500 slots until its frame is gone: 36 to 40 of 40 closed one task after
+// setLocalDescription resolved, 30 of 40 closed in the task the other end finished in, none closed 5 ms
+// later (2026-11-13).
+/** A connection is closed no sooner than this after its last signalling step. */
+export const CLOSE_AFTER_STEP_MS = 5
+
 /** One connection attempt. `onopen` and `onclose` fire at most once each; `onclose` does not follow a `close()`. */
 export type Link = {
-  /** Applies the remote's answer to our offer. A refused answer closes the link and rejects. */
+  /** Applies the remote's answer to our offer. A refused answer closes the link and rejects. A closed link rejects. */
   accept(remoteSdp: string): Promise<void>
   onopen: ((socket: Stream) => void) | null
   onclose: (() => void) | null
@@ -28,7 +35,10 @@ export type Links = {
   remoteAddress(link: Link): string | undefined
 }
 
-/** `offer` and `answer` reject with this when no more connections can be made (Chromium allows 500 a page). */
+/**
+ * `offer` and `answer` reject with this when the class would not make a connection: there is no slot now
+ * (Chromium allows 500 a page), which says nothing about a later try.
+ */
 export class LinksFull extends Error {}
 
 /** What a connection reports while it collects its own addresses. */
@@ -94,6 +104,8 @@ export type RtcLinksOptions = {
   iceServers?: any[]
 }
 
+type Step = <T>(taken: Promise<T>) => Promise<T>
+
 /** `Links`, where a caller may also say when each description is read. */
 export type RtcLinks = {
   offer(gathered?: Gathered): Promise<Made>
@@ -106,16 +118,18 @@ export type RtcLinks = {
  *
  * It promises a description within `GATHER_CAP_MS` (or whenever `gathered` says), a stream that keeps what the
  * remote sent before anything read it, sends cut to the connection's message limit and paced by the channel's
- * `bufferedAmount`, and that a closed link leaves none of its handlers on the connection. The link itself still
- * reaches its connection, so the connection is freed once the caller lets the link go. It contacts nothing by
- * itself: the ICE servers are the caller's.
+ * `bufferedAmount`, and that a closed link leaves none of its handlers on the connection. However a link ends,
+ * its channel is closed at once and its connection `CLOSE_AFTER_STEP_MS` after its last signalling step or
+ * later, on a timer of the thread it runs in when that moment is still ahead. The link itself still reaches
+ * its connection, so the connection is freed once the caller lets the link go. It contacts nothing by itself:
+ * the ICE servers are the caller's.
  */
 export const rtcLinks = ({ RTCPeerConnection, iceServers = [] }: RtcLinksOptions): RtcLinks => {
   const connections = new WeakMap<Link, PeerConnectionLike>()
 
   const negotiate = async (
     gathered: Gathered,
-    describe: (pc: PeerConnectionLike, attach: (channel: DataChannelLike) => void) => Promise<void>,
+    describe: (pc: PeerConnectionLike, attach: (channel: DataChannelLike) => void, step: Step) => Promise<void>,
   ): Promise<Made> => {
     let pc: PeerConnectionLike
     try {
@@ -131,6 +145,27 @@ export const rtcLinks = ({ RTCPeerConnection, iceServers = [] }: RtcLinksOptions
     let sent = 0
     let waiting = false
     let slice = SLICE
+    let stepping = 0
+    let steppedAt = 0
+
+    const shut = () => {
+      if (stepping) return
+      const close = () => { try { pc.close() } catch { /* already closed */ } }
+      if (Date.now() - steppedAt > CLOSE_AFTER_STEP_MS) close()
+      else setTimeout(close, CLOSE_AFTER_STEP_MS)
+    }
+
+    /** One signalling step. A link that ends meanwhile closes its connection once the step has settled. */
+    const step: Step = async taken => {
+      stepping++
+      try {
+        return await taken
+      } finally {
+        stepping--
+        steppedAt = Date.now()
+        if (closed) shut()
+      }
+    }
 
     const release = () => {
       closed = true
@@ -140,7 +175,7 @@ export const rtcLinks = ({ RTCPeerConnection, iceServers = [] }: RtcLinksOptions
         channel.onopen = channel.onmessage = channel.onclose = channel.onerror = channel.onbufferedamountlow = null
         try { channel.close() } catch { /* already closed */ }
       }
-      try { pc.close() } catch { /* already closed */ }
+      shut()
     }
 
     const end = (error?: Error) => {
@@ -214,8 +249,9 @@ export const rtcLinks = ({ RTCPeerConnection, iceServers = [] }: RtcLinksOptions
       onopen: null,
       onclose: null,
       accept: async remoteSdp => {
+        if (closed) throw new Error('the link is closed')
         try {
-          await pc.setRemoteDescription({ type: 'answer', sdp: remoteSdp })
+          await step(pc.setRemoteDescription({ type: 'answer', sdp: remoteSdp }))
         } catch (error) {
           end()
           throw error
@@ -243,7 +279,7 @@ export const rtcLinks = ({ RTCPeerConnection, iceServers = [] }: RtcLinksOptions
     pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed') end() }
 
     try {
-      await describe(pc, attach)
+      await describe(pc, attach, step)
       if (pc.iceGatheringState === 'complete') complete()
       await gathered(gathering)
       const sdp = pc.localDescription?.sdp
@@ -256,14 +292,14 @@ export const rtcLinks = ({ RTCPeerConnection, iceServers = [] }: RtcLinksOptions
   }
 
   return {
-    offer: (gathered = gatherCap) => negotiate(gathered, async (pc, attach) => {
+    offer: (gathered = gatherCap) => negotiate(gathered, async (pc, attach, step) => {
       attach(pc.createDataChannel('webtorrent'))
-      await pc.setLocalDescription(await pc.createOffer())
+      await step(pc.setLocalDescription(await step(pc.createOffer())))
     }),
-    answer: (remoteSdp, gathered = gatherCap) => negotiate(gathered, async (pc, attach) => {
+    answer: (remoteSdp, gathered = gatherCap) => negotiate(gathered, async (pc, attach, step) => {
       pc.ondatachannel = ({ channel }) => attach(channel)
-      await pc.setRemoteDescription({ type: 'offer', sdp: remoteSdp })
-      await pc.setLocalDescription(await pc.createAnswer())
+      await step(pc.setRemoteDescription({ type: 'offer', sdp: remoteSdp }))
+      await step(pc.setLocalDescription(await step(pc.createAnswer())))
     }),
     remoteAddress: link =>
       connections.get(link)?.sctp?.transport?.iceTransport?.getSelectedCandidatePair?.()?.remote?.address || undefined,

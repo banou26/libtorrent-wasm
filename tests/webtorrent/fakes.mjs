@@ -191,11 +191,20 @@ let nextPc = 1
  *   rate       bytes a channel moves per task; Infinity by default
  *   address    what the other end reads as this end's remote address
  *   mute       takes and gives descriptions and then never connects
+ *   stepMs     how long each signalling step takes to settle; left out, a step settles in a microtask
+ *   fails      the name of a signalling step that rejects, such as 'createOffer'
  * A channel whose `onmessage` is not set by the end of the task it appeared in never hears anything, and what
  * it should have heard is counted in `stats.lost`: that is what Chrome, Firefox and WebKit were measured doing.
+ * A connection closed while one of its signalling steps is in flight, or sooner than 5 ms after the last one
+ * settled, is counted in `stats.early`: Chromium 156 was measured keeping the slot of such a connection. Each
+ * connection keeps the two times, `steppedAt` and `closedAt`, read from `Date.now()`, so a case that asserts
+ * on them mocks `Date` along with `setTimeout`.
  */
 export const fakeRtc = (options = {}) => {
-  const { gathering = 'task', completion = 'both', capacity = Infinity, maxMessageSize = 262144, rate = Infinity, address, mute = false } = options
+  const {
+    gathering = 'task', completion = 'both', capacity = Infinity, maxMessageSize = 262144, rate = Infinity, address,
+    mute = false, stepMs, fails,
+  } = options
 
   class FakeDataChannel {
     binaryType = 'blob'
@@ -261,7 +270,7 @@ export const fakeRtc = (options = {}) => {
   }
 
   class Class {
-    static stats = { made: 0, sent: 0, maxBuffered: 0, maxMessage: 0, lost: 0 }
+    static stats = { made: 0, sent: 0, maxBuffered: 0, maxMessage: 0, lost: 0, early: 0 }
     static all = []
 
     iceGatheringState = 'new'
@@ -277,6 +286,9 @@ export const fakeRtc = (options = {}) => {
     remote = null
     sendLimit = 65536
     closed = false
+    stepping = 0
+    steppedAt = null
+    closedAt = null
 
     constructor(configuration) {
       if (Class.stats.made >= capacity) throw new Error('UnknownError: Cannot create so many PeerConnections')
@@ -296,15 +308,36 @@ export const fakeRtc = (options = {}) => {
       return { type, sdp: `v=0\r\na=fake:${this.id}\r\n${limit}` }
     }
 
-    async createOffer() {
-      return this.describe('offer')
+    /** One signalling step: it settles after `stepMs`, and the connection notes when. */
+    async step(name, work) {
+      this.stepping++
+      try {
+        if (stepMs !== undefined) await new Promise(resolve => setTimeout(resolve, stepMs))
+        if (fails === name) throw new Error(`OperationError: ${name}`)
+        return work()
+      } finally {
+        this.stepping--
+        this.steppedAt = Date.now()
+      }
     }
 
-    async createAnswer() {
-      return this.describe('answer')
+    createOffer() {
+      return this.step('createOffer', () => this.describe('offer'))
     }
 
-    async setLocalDescription(description) {
+    createAnswer() {
+      return this.step('createAnswer', () => this.describe('answer'))
+    }
+
+    setLocalDescription(description) {
+      return this.step('setLocalDescription', () => this.takeLocal(description))
+    }
+
+    setRemoteDescription(description) {
+      return this.step('setRemoteDescription', () => this.takeRemote(description))
+    }
+
+    takeLocal(description) {
       const pc = this
       this.localDescription = { type: description.type, get sdp() { return description.sdp + pc.candidates.join('') } }
       this.iceGatheringState = 'gathering'
@@ -338,7 +371,7 @@ export const fakeRtc = (options = {}) => {
       this.connect()
     }
 
-    async setRemoteDescription({ type, sdp }) {
+    takeRemote({ type, sdp }) {
       const id = Number(/a=fake:(\d+)/.exec(sdp ?? '')?.[1])
       const remote = pcs.get(id)
       if (!remote || remote.closed) throw new Error('InvalidAccessError: no such description')
@@ -362,7 +395,8 @@ export const fakeRtc = (options = {}) => {
       const [offerer, answerer] = this.channel ? [this, remote] : [remote, this]
       for (const pc of [offerer, answerer]) pc.connectionState = 'connecting'
       setImmediate(() => {
-        if (offerer.closed || answerer.closed) return
+        // A channel its maker closed before the connection was up is never opened at the other end.
+        if (offerer.closed || answerer.closed || offerer.channel.readyState === 'closed') return
         for (const pc of [offerer, answerer]) {
           pc.connectionState = 'connected'
           pc.pair = { remote: { address: pc.remote.address } }
@@ -392,6 +426,8 @@ export const fakeRtc = (options = {}) => {
     close() {
       if (this.closed) return
       this.closed = true
+      this.closedAt = Date.now()
+      if (this.stepping || (this.steppedAt !== null && this.closedAt - this.steppedAt < 5)) Class.stats.early++
       this.connectionState = 'closed'
       pcs.delete(this.id)
       this.channel?.close()
