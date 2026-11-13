@@ -637,6 +637,10 @@ the host with cargo through rustup ([its section](#building-it) says what that n
 `nix shell nixpkgs#rustup -c npm run build`. `vite-build` and `types` then write every entry into `build/`,
 which is what the package ships.
 
+The tests need Node 24 or later. Node 22 holds a whole test file to `--test-timeout`, where 24 holds each test
+to it, and four files run past the 60 s the scripts give: on 22.23.4 `npm run test:ci` ends with those four
+cancelled.
+
 `./build.sh` is the engine alone, in one step: it builds the image and copies `dist/*` out.
 
 For iterative C++ development:

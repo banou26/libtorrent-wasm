@@ -31,9 +31,12 @@ jobs:
           # `make dist` applies patches/*.patch onto the libtorrent submodule, so it has to be here.
           submodules: recursive
 
+      # 24 or later. Node 22 holds a whole test FILE to --test-timeout, where 24 holds each test to it,
+      # and four files of the suite run past its 60 s: on 22.23.4 `npm run test:ci` ends with those
+      # four cancelled, on 24.21.0 it passes.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - run: npm ci
