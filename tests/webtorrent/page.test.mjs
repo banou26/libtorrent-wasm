@@ -5,11 +5,17 @@
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import test from 'node:test'
+import v8 from 'node:v8'
+import vm from 'node:vm'
 import { Worker } from 'node:worker_threads'
 
 import { LinksFull, pageLinks, rtcLinks } from '../../build/webtorrent/index.js'
 import { servePeerLinks } from '../../build/webtorrent/page.js'
 import { advance, fakeRtc, handlersOf, pair, reached, reading, settle, until, within, writeAll } from './fakes.mjs'
+
+// The collector on demand, without a flag on the command line.
+v8.setFlagsFromString('--expose-gc')
+const collect = vm.runInNewContext('gc')
 
 const KIB = 1024
 const MIB = 1024 * KIB
@@ -203,6 +209,51 @@ test('close crosses the port in both directions, and a closed link leaves nothin
     assert.equal(pc.closed, true)
     assert.deepEqual(handlersOf(pc), [])
   }
+})
+
+test('the page keeps no reference to a connection whose link ended, however it ended: each can be collected', async t => {
+  const Class = fakeRtc()
+  const Remote = fakeRtc()
+  const made = []
+  let ending = ''
+  class Watched extends Class {
+    constructor(configuration) {
+      super(configuration)
+      made.push({ ending, connection: new WeakRef(this) })
+    }
+  }
+  const { links } = half(t, Watched)
+
+  // Each ending in a function of its own, so that nothing of the link stays on this one's stack.
+  const opened = async () => {
+    const { a, b } = await pair(links, rtcLinks({ RTCPeerConnection: Remote }))
+    return { ours: a.link, theirs: b.link }
+  }
+  const endings = {
+    'the worker closed it while open': async () => (await opened()).ours.close(),
+    'the remote closed it': async () => (await opened()).theirs.close(),
+    'the worker closed it before it opened': async () => (await links.offer()).link.close(),
+    'it could not be made': () => links.answer('v=0\r\na=fake:999999\r\n').catch(() => {}),
+  }
+  for (const [name, end] of Object.entries(endings)) {
+    ending = name
+    await end()
+    await settle(40)
+  }
+  ending = 'held on purpose'
+  const held = new Watched({ iceServers: [] })
+
+  // The classes list their instances for the other cases: that is this file's reference, not the page's.
+  Class.all.length = 0
+  Remote.all.length = 0
+  for (let i = 0; i < 6; i++) {
+    await settle()
+    collect()
+  }
+  const reachable = made.filter(({ connection }) => connection.deref()).map(({ ending }) => ending)
+  assert.deepEqual(reachable, ['held on purpose'], 'and the check can tell: the one this case holds is still there')
+  assert.equal(made.length, 5, 'one connection for each ending, and the one held')
+  held.close()
 })
 
 test('a constructor the browser refuses reaches the worker as LinksFull', async t => {

@@ -63,6 +63,12 @@ export const servePeerLinks = (port: PortLike, options: RtcLinksOptions): (() =>
     entry.owed = 0
   }
 
+  /** A link ended by itself: the page keeps nothing of it, and the worker is told how it ended. */
+  const ended = (id: number, message: ToWorker) => {
+    served.delete(id)
+    post(message)
+  }
+
   const serve = async (id: number, make: (gathered: Gathered) => Promise<Made>) => {
     // The wait for the worker's `flush` is there before the connection is: on a page whose tasks run late the
     // flush comes first, and dropping it would leave the description unread and the connection open for good.
@@ -91,14 +97,10 @@ export const servePeerLinks = (port: PortLike, options: RtcLinksOptions): (() =>
         })
         post({ t: 'open', id })
       }
-      link.onclose = () => {
-        served.delete(id)
-        post({ t: 'closed', id })
-      }
+      link.onclose = () => ended(id, { t: 'closed', id })
       post({ t: 'sdp', id, sdp })
     } catch (error) {
-      served.delete(id)
-      post({ t: 'failed', id, full: error instanceof LinksFull, reason: String(error) })
+      ended(id, { t: 'failed', id, full: error instanceof LinksFull, reason: String(error) })
     }
   }
 
