@@ -97,16 +97,22 @@ const publicCandidatesOnly = (sdp: string) =>
     })
     .join('\r\n')
 
-/** Listeners first, then the `on` handler. A handler that throws is reported and never unwinds the stack's drain. */
-function emit(target: EventTarget, event: Event) {
-  target.dispatchEvent(event)
-  const handler = (target as unknown as Record<string, unknown>)[`on${event.type}`]
-  if (typeof handler !== 'function') return
-  try {
-    handler.call(target, event)
-  } catch (error) {
-    queueMicrotask(() => {
-      throw error
+/**
+ * Gives a class the platform's `on` handlers for `types`. A handler is a listener, in the place
+ * its first one was set: it sees an event as any listener does, and what it throws is reported
+ * by the dispatch and never unwinds the stack's drain.
+ */
+function handlers(target: { prototype: EventTarget }, ...types: string[]) {
+  for (const type of types) {
+    const handler = Symbol(`on${type}`)
+    Object.defineProperty(target.prototype, `on${type}`, {
+      get() {
+        return this[handler] ?? null
+      },
+      set(value) {
+        if (!(handler in this)) this.addEventListener(type, (event: Event) => this[handler]?.call(this, event))
+        this[handler] = typeof value === 'function' ? value : null
+      },
     })
   }
 }
@@ -289,8 +295,8 @@ class Channel {
     this.queuedBytes = 0
     this.inStack = 0
     this.high = false
-    if (error) emit(this.target, Object.assign(new Event('error'), { error }))
-    emit(this.target, new Event('close'))
+    if (error) this.target.dispatchEvent(Object.assign(new Event('error'), { error }))
+    this.target.dispatchEvent(new Event('close'))
   }
 }
 
@@ -436,19 +442,19 @@ class Connection {
       this.channels.set(index, channel)
       channel.state = 'open'
       channel.streaming = channel.stale = true
-      emit(this.target, Object.assign(new Event('datachannel'), { channel: channel.target }))
+      this.target.dispatchEvent(Object.assign(new Event('datachannel'), { channel: channel.target }))
     } else {
       // stale: the stack counts the message that opened the channel until the peer acknowledges it
       channel.streaming = channel.stale = true
       if (channel.state !== 'connecting') return
       channel.state = 'open'
     }
-    if (channel.state === 'open') emit(channel.target, new Event('open'))
+    if (channel.state === 'open') channel.target.dispatchEvent(new Event('open'))
   }
 
   #message(index: number, data: string | ArrayBuffer) {
     const channel = this.channels.get(index)
-    if (channel) emit(channel.target, new MessageEvent('message', { data }))
+    if (channel) channel.target.dispatchEvent(new MessageEvent('message', { data }))
   }
 
   /**
@@ -499,7 +505,7 @@ class Connection {
     for (const channel of this.channels.values()) {
       if (!channel.high || channel.buffered > channel.threshold) continue
       channel.high = false
-      queueMicrotask(() => emit(channel.target, new Event('bufferedamountlow')))
+      queueMicrotask(() => channel.target.dispatchEvent(new Event('bufferedamountlow')))
     }
   }
 
@@ -518,7 +524,7 @@ class Connection {
   #state(state: RTCPeerConnectionState) {
     if (this.state === state) return
     this.state = state
-    emit(this.target, new Event('connectionstatechange'))
+    this.target.dispatchEvent(new Event('connectionstatechange'))
   }
 
   receive(ip: number, port: number, data: Uint8Array) {
@@ -600,7 +606,7 @@ class Connection {
 
   /** The one candidate is in the description from the start, so gathering is these four events and nothing else. */
   #gather(sdp: string) {
-    const fire = (event: Event) => this.handle && emit(this.target, event)
+    const fire = (event: Event) => this.handle && this.target.dispatchEvent(event)
     const candidate = { candidate: /^a=(candidate:.*)$/m.exec(sdp)![1], sdpMid: /^a=mid:(.*)$/m.exec(sdp)![1], sdpMLineIndex: 0 }
     this.gathering = 'gathering'
     fire(new Event('icegatheringstatechange'))
@@ -686,18 +692,18 @@ class Connection {
     this.state = state
     queueMicrotask(() => {
       for (const channel of channels) channel.closed(error)
-      if (state === 'failed') emit(this.target, new Event('connectionstatechange'))
+      if (state === 'failed') this.target.dispatchEvent(new Event('connectionstatechange'))
     })
   }
 }
 
 class RTCDataChannel extends EventTarget implements api.RTCDataChannel {
   #channel: Channel
-  onopen: api.RTCDataChannel['onopen'] = null
-  onmessage: api.RTCDataChannel['onmessage'] = null
-  onbufferedamountlow: api.RTCDataChannel['onbufferedamountlow'] = null
-  onerror: api.RTCDataChannel['onerror'] = null
-  onclose: api.RTCDataChannel['onclose'] = null
+  declare onopen: api.RTCDataChannel['onopen']
+  declare onmessage: api.RTCDataChannel['onmessage']
+  declare onbufferedamountlow: api.RTCDataChannel['onbufferedamountlow']
+  declare onerror: api.RTCDataChannel['onerror']
+  declare onclose: api.RTCDataChannel['onclose']
 
   constructor(channel: Channel) {
     super()
@@ -740,13 +746,14 @@ class RTCDataChannel extends EventTarget implements api.RTCDataChannel {
     this.#channel.close()
   }
 }
+handlers(RTCDataChannel, 'open', 'message', 'bufferedamountlow', 'error', 'close')
 
 export class RTCPeerConnection extends EventTarget implements api.RTCPeerConnection {
   #connection: Connection
-  onconnectionstatechange: api.RTCPeerConnection['onconnectionstatechange'] = null
-  ondatachannel: api.RTCPeerConnection['ondatachannel'] = null
-  onicecandidate: api.RTCPeerConnection['onicecandidate'] = null
-  onicegatheringstatechange: api.RTCPeerConnection['onicegatheringstatechange'] = null
+  declare onconnectionstatechange: api.RTCPeerConnection['onconnectionstatechange']
+  declare ondatachannel: api.RTCPeerConnection['ondatachannel']
+  declare onicecandidate: api.RTCPeerConnection['onicecandidate']
+  declare onicegatheringstatechange: api.RTCPeerConnection['onicegatheringstatechange']
 
   /** `createWebRTC` supplies `host`. `iceServers` is accepted and ignored: no STUN server is asked. */
   constructor(host: Host, _configuration?: RTCConfiguration) {
@@ -802,3 +809,4 @@ export class RTCPeerConnection extends EventTarget implements api.RTCPeerConnect
     this.#connection.end('closed')
   }
 }
+handlers(RTCPeerConnection, 'connectionstatechange', 'datachannel', 'icecandidate', 'icegatheringstatechange')

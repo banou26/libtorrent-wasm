@@ -73,6 +73,51 @@ test('the description carries the one host candidate from the start, then gather
   assert.equal(local.socket.sent.length, 0, 'no STUN server is asked and no peer is known yet')
 })
 
+test('an on handler is a listener, in the place its first one was set', async (t) => {
+  const local = await factory()
+  t.after(local.close)
+  const pc = new local.RTCPeerConnection()
+  assert.equal(pc.onicegatheringstatechange, null)
+  const seen = []
+  const replaced = () => seen.push('the handler that was replaced')
+  const handler = function (event) {
+    seen.push(`handler: ${pc.iceGatheringState}, this is the connection: ${this === pc}, type ${event.type}`)
+  }
+  pc.addEventListener('icegatheringstatechange', (event) => {
+    seen.push(`first listener: ${pc.iceGatheringState}`)
+    if (pc.iceGatheringState === 'complete') event.stopImmediatePropagation()
+  })
+  pc.onicegatheringstatechange = replaced
+  pc.addEventListener('icegatheringstatechange', () => seen.push(`second listener: ${pc.iceGatheringState}`))
+  pc.onicegatheringstatechange = handler
+  assert.equal(pc.onicegatheringstatechange, handler)
+
+  pc.createDataChannel('x')
+  // the null candidate is the last event of gathering
+  const complete = new Promise((resolve) => pc.addEventListener('icecandidate', ({ candidate }) => candidate || resolve()))
+  await pc.setLocalDescription()
+  await complete
+  assert.deepEqual(seen, [
+    'first listener: gathering',
+    'handler: gathering, this is the connection: true, type icegatheringstatechange',
+    'second listener: gathering',
+    // stopped by the first listener, as any listener after it is
+    'first listener: complete',
+  ])
+
+  pc.onicegatheringstatechange = 'not a function'
+  assert.equal(pc.onicegatheringstatechange, null)
+  const channel = pc.createDataChannel('y')
+  let closes = 0
+  channel.onclose = () => closes++
+  channel.onclose = null
+  assert.equal(channel.onclose, null)
+  const closed = new Promise((resolve) => channel.addEventListener('close', resolve))
+  pc.close()
+  await closed
+  assert.equal(closes, 0, 'a handler set to null is not called')
+})
+
 test('an offer needs a data channel, and a channel is ordered and reliable or refused', async (t) => {
   const local = await factory()
   t.after(local.close)
