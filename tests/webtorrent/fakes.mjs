@@ -343,6 +343,8 @@ export const fakeRtc = (options = {}) => {
       const remote = pcs.get(id)
       if (!remote || remote.closed) throw new Error('InvalidAccessError: no such description')
       if (type === 'answer' && !this.localDescription) throw new Error('InvalidStateError')
+      // A browser takes a description for what `type` says it is, and one set under the other type never connects.
+      if (type !== remote.localDescription?.type) throw new Error(`InvalidAccessError: that description is not an ${type}`)
       this.remote = remote
       this.sendLimit = Number(/a=max-message-size:(\d+)/.exec(sdp)?.[1] ?? 65536)
       this.sctp = {
