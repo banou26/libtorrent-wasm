@@ -43,6 +43,9 @@ export const countingHost = ({ routes = {} } = {}) => {
         const socket = real.dgram.createSocket(...args)
         const send = socket.send.bind(socket)
         socket.send = (buf, offset, length, port, address, ...rest) => {
+          // node holds a send made before the bind has landed and makes it again through this
+          // same property, as (list, port, address, callback): already counted, so it goes through
+          if (Array.isArray(buf)) return send(buf, offset, length, port)
           datagrams.push({ address, port })
           if (isLoopback(address)) send(buf, offset, length, port, address, ...rest)
         }
