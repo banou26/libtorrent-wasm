@@ -51,11 +51,14 @@ export const MAX_MESSAGE_SIZE = 262144
 const SEND_QUEUE_LIMIT = 16 * 1024 * 1024
 
 /**
- * Datagrams a socket is handed in one millisecond. A window that opens all at once, on a write
- * into an idle connection or on a retransmission timeout, is about a thousand datagrams, and
- * node's dgram puts what one task hands it on the wire together. libtorrent 2.1 ends a
- * connection on reading 1000 datagrams with its socket never empty: 4 of 15 uploads of 256 MiB
- * over a 50 ms round trip ended that way, and none of 30 with this bound.
+ * Datagrams a socket is handed each time the count starts again, which is once in a task and
+ * once in a millisecond at most: 128 in a task, and 256 within a millisecond when two counts
+ * meet. A window that opens all at once, on a write into an idle connection or on a
+ * retransmission timeout, is about a thousand datagrams once the send buffer is 1 MiB or more,
+ * and a socket puts what one task hands it on the wire together. libtorrent 2.1 ends a
+ * connection on reading 1000 datagrams with its socket never empty: with the send buffer at
+ * 4 MiB, 11 of 35 uploads of 256 MiB over a 50 ms round trip ended that way, and none of 66
+ * with this bound. At the default send buffer a window is some 220 datagrams.
  */
 const MAX_BURST = 128
 

@@ -4,7 +4,10 @@ import { wasi } from './wasi'
 
 /**
  * The part of a `node:dgram` socket this module drives. Node's own and @fkn/lib's both fit.
- * A `message` may arrive while `send` is still running, as from a socket joined to it in memory.
+ * A `message` may arrive while `send` is still running, as from a socket joined to it in
+ * memory, and any number of them in one task, as from @fkn/lib's. The socket is handed at most
+ * 128 datagrams in one task and 256 within one millisecond, over all connections; only the
+ * factory's `close()` hands it more, the last words of every connection.
  */
 export interface DatagramSocket {
   send(data: Uint8Array, port: number, address: string, callback?: (error: Error | null) => void): void
