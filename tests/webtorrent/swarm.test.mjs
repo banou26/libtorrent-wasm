@@ -618,6 +618,8 @@ test('a remote whose channel closed is not answered for 60 s', async t => {
   await r.start(1)
   const remote = new Remote(r)
   assert.equal(await remote.connect(1), true)
+  remote.sockets[0].write(Buffer.of(19))
+  await settle()
   remote.sockets[0].destroy()
   await settle()
   assert.equal(r.peers.snapshot().torrents[0].open, 0)
@@ -670,7 +672,7 @@ test('a remote that never sent a byte before the engine gave its stream up is le
   assert.equal(await remote.connect(1), true)
 })
 
-test('a remote that sent even one byte is never counted silent, nor one whose stream nothing dialled, nor one that closed its own channel', async t => {
+test('a remote that sent even one byte is never counted silent, nor one whose stream the engine let go without reading it, nor one we gave up ourselves', async t => {
   const r = rig(t)
   await r.start(1)
   const spoke = new Remote(r)
@@ -685,17 +687,41 @@ test('a remote that sent even one byte is never counted silent, nor one whose st
   const undialled = new Remote(r)
   assert.equal(await undialled.connect(1), true)
   await giveUp(r.session.streams[1])
-  r.session.dials = true
 
-  const left = new Remote(r)
-  assert.equal(await left.connect(1), true)
-  left.sockets[0].destroy()
-  await settle()
+  // Nor does the swarm closing a channel nothing dialled, 10 s after it opened.
+  const dropped = new Remote(r)
+  assert.equal(await dropped.connect(1), true)
+  await advance(t, 11 * SECOND, SECOND)
+  assert.equal(dropped.closes, 1)
+  r.session.dials = true
 
   assert.deepEqual([r.peers.snapshot().torrents[0].silent, r.live()], [0, 0])
   await advance(t, 61 * SECOND, SECOND)
-  for (const remote of [spoke, undialled, left]) assert.equal(await remote.connect(1), true, 'each is answered again after the 60 s')
+  for (const remote of [spoke, undialled, dropped]) assert.equal(await remote.connect(1), true, 'each is answered again after the 60 s')
 })
+
+// What Chrome 156 sees of a libtorrent 2.1 peer that has no use for a channel: it ends 1 ms after it opened.
+for (const dialled of [true, false]) {
+  test(`a remote that ends its channel before it has sent a byte is left alone for ten minutes too, ${dialled ? 'read by the engine by then' : 'before the engine read it'}`, async t => {
+    const r = rig(t)
+    r.tracker.phantoms = { complete: 1, incomplete: 0 }
+    await r.start(1)
+    r.session.dials = dialled
+    const remote = new Remote(r, undefined, fakeRtc())
+    assert.equal(await remote.connect(1), true)
+    remote.sockets[0].destroy()
+    await settle()
+    assert.deepEqual([r.peers.snapshot().torrents[0].silent, r.live()], [1, 1], 'it is counted, and our offer still waits')
+
+    await advance(t, 121 * SECOND, SECOND)
+    assert.equal(await remote.connect(1), false, 'its offer is not answered after the 60 s of a closed channel')
+    const [offer] = r.offered(1).at(-1).offers
+    await remote.answer(1, offer)
+    assert.equal(r.session.streams.length, 1, 'and its answer to an offer of ours is not taken')
+    await advance(t, 480 * SECOND, SECOND)
+    assert.equal(await remote.connect(1), true, 'ten minutes later it is')
+  })
+}
 
 test('a silent remote is still left alone after its torrent was paused and resumed', async t => {
   const r = rig(t)
@@ -745,10 +771,12 @@ test('with the relay flag the address a silent remote came from is left alone to
   const left = from(r, '198.51.100.8')
   assert.equal(await left.connect(1), true)
   assert.equal(r.session.streams.length, 2, 'another address does')
+  left.sockets[0].write(Buffer.of(19))
+  await settle()
   left.sockets[0].destroy()
   await settle()
   assert.equal(await from(r, '198.51.100.8').connect(1), true)
-  assert.equal(r.session.streams.length, 3, 'and an address whose remote closed its own channel is not kept')
+  assert.equal(r.session.streams.length, 3, 'and an address whose remote spoke before its channel closed is not kept')
 
   const plain = rig(t)
   await plain.start(1)

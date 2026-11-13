@@ -67,6 +67,7 @@ const cross = async (t, RTCPeerConnection) => {
   // The end with the larger id may still hold its own offer, which the other end chose not to answer: it
   // waits out its 50 s like any offer nobody answered.
   assert.ok(a.state().pending + b.state().pending <= 1, 'and at most one unanswered offer is left waiting')
+  assert.deepEqual([a.state().silent, b.state().silent], [0, 0], 'neither end takes the other, whose losing attempt it saw close, for a remote that will not talk')
   await exchange(a, b)
   return { a, b }
 }

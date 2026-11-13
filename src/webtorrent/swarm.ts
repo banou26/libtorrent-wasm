@@ -61,7 +61,7 @@ const OPENING_MS = 30_000
 const UNDIALLED_MS = 10_000
 const QUIET_AFTER_CLOSE_MS = 60_000
 // A libtorrent 2.1 peer refuses for as long as it lists our address, which outlasts a session. Each new try
-// costs a connection and a peer slot for the 11 s its silence takes to show.
+// costs a connection, and where its silence only shows at libtorrent's handshake timeout a peer slot for 11 s.
 const QUIET_AFTER_SILENCE_MS = 600_000
 /** Remotes one torrent leaves alone at a time. Past it the oldest is forgotten. */
 const MAX_QUIET = 200
@@ -105,8 +105,8 @@ export type TorrentPeers = {
   open: number
   lastPeerAt: number | null
   /**
-   * Remotes whose channel opened and that never sent a byte, in the last ten minutes: peers that will not talk
-   * to this address, which is not the same as nobody being there.
+   * Remotes whose channel opened and ended without a byte from them, in the last ten minutes: peers that will
+   * not talk to this address, which is not the same as nobody being there.
    */
   silent: number
 }
@@ -294,7 +294,8 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
 
   /**
    * Leaves the remote of an attempt that ended alone for a while: for ten minutes, and its answers too, when
-   * the engine ended its stream without a byte from it having arrived.
+   * its channel had opened and ended, by its doing or the engine's, without a byte from it having arrived. An
+   * attempt the swarm itself gives up is not that: its stream has not ended when this runs.
    */
   const quieten = (t: Torrent, remote: string, conn: Conn) => {
     const silent = conn.socket?.silent ?? false
@@ -357,7 +358,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     if (address) {
       await look(t)
       if (!t.conns.has(conn)) return
-      // libtorrent keeps one connection per address, and a libtorrent 2.1 remote leaves the channel silent
+      // libtorrent keeps one connection per address, and a libtorrent 2.1 remote has no use for the channel
       // when its list holds our address, as it does once it was our ordinary peer.
       if (t.ordinary.has(address)) return drop(conn)
       for (const quiet of t.quiet.values()) if (quiet.address === address) return drop(conn)

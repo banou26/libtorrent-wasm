@@ -69,12 +69,16 @@ export class Stream implements PeerStream {
     return this.listeners.get(event)?.length ?? 0
   }
 
+  // What a libtorrent 2.1.1 peer that has no use for a channel looks like from here (2026-11-13): Chrome 156
+  // and libdatachannel see it end the channel within a millisecond of its opening (3 and 5 channels), and the
+  // reference client's stack sees it stay open and silent until libtorrent's handshake timeout, 10.4 to
+  // 12.7 s later (50 channels).
   /**
-   * Its reader ended it and the remote had never sent a byte. A libtorrent 2.1 peer that will not talk to this
-   * address opens the channel, says nothing and never closes it, so this is all that shows of it.
+   * It has ended and the remote never sent a byte, whichever end closed it. A stream its reader let go without
+   * ever reading it does not count: that says nothing about the remote.
    */
   get silent(): boolean {
-    return this.destroyed && !this.heard && this.listenerCount('data') > 0
+    return this.ended !== false && !this.heard && (!this.destroyed || this.listenerCount('data') > 0)
   }
 
   write(bytes: Uint8Array): boolean {
