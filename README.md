@@ -289,7 +289,8 @@ webtorrentPeers(session, {
   drop its tracker socket for up to a minute.
 - **A connection is closed 5 ms after its last signalling step, or later**, however its link ended; its channel
   is closed at once. Chromium keeps one of the page's 500 slots for a connection closed sooner, until the frame
-  is gone. The wait is a timer in the thread the connection lives in, and it is the page half's only timer.
+  is gone. The wait is a timer in the thread the connection lives in, and it is the page half's only timer: a
+  hidden page runs it late, which only closes the connection later.
 - **A connection the WebRTC class will not make is no error.** It means there is no slot now: the attempt ends,
   `snapshot().unmade` counts it, nothing more is asked of the class until the next announce goes out, and that
   announce tries again.
