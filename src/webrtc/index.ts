@@ -49,13 +49,23 @@ export interface WebRTCOptions {
 }
 
 export interface WebRTC {
-  /** The platform's constructor, for the subset the README lists. `iceServers` is accepted and ignored. */
+  /**
+   * The platform's constructor, for the subset the README lists. `iceServers` is accepted and
+   * ignored. The platform's own `RTCPeerConnection` fits this type too, so code that takes
+   * either constructor names this one.
+   */
   RTCPeerConnection: new (configuration?: RTCConfiguration) => RTCPeerConnection
   /** Datagrams that belonged to no connection and were dropped. */
   readonly droppedDatagrams: number
   /** Closes every connection and stops listening to the socket, which stays open. */
   close(): void
 }
+
+/**
+ * An `on` handler. A method's type, which lets a handler written for a wider event fit: that
+ * is what makes the platform's own objects fit the two interfaces below.
+ */
+type Handler<E extends Event = Event> = { handler(event: E): void }['handler'] | null
 
 /**
  * The part of the platform's RTCDataChannel this module stands in for: an ordered, reliable
@@ -74,14 +84,14 @@ export interface RTCDataChannel extends EventTarget {
   readonly bufferedAmount: number
   /** `bufferedamountlow` fires when `bufferedAmount` falls from above this to it or below. 0 at first. */
   bufferedAmountLowThreshold: number
-  onopen: ((event: Event) => void) | null
+  onopen: Handler
   /** `data` is a string for a text message and an ArrayBuffer for a binary one. */
-  onmessage: ((event: MessageEvent<string | ArrayBuffer>) => void) | null
+  onmessage: Handler<MessageEvent<string | ArrayBuffer>>
   /** Never fires inside `send`. */
-  onbufferedamountlow: ((event: Event) => void) | null
+  onbufferedamountlow: Handler
   /** Fires before `close` when the connection ended for a reason: `error` says which. */
-  onerror: ((event: Event & { error: DOMException }) => void) | null
-  onclose: ((event: Event) => void) | null
+  onerror: Handler<Event & { error: DOMException }>
+  onclose: Handler
   /**
    * Queues a message, whose bytes are taken now. Throws InvalidStateError unless the channel is
    * open, TypeError when the message is larger than `sctp.maxMessageSize` of its connection,
@@ -108,20 +118,20 @@ export interface RTCPeerConnection extends EventTarget {
   readonly connectionState: RTCPeerConnectionState
   readonly iceGatheringState: RTCIceGatheringState
   /** Its SDP carries the one host candidate from the start, before gathering is reported complete. */
-  readonly localDescription: { readonly type: 'offer' | 'answer'; readonly sdp: string } | null
-  readonly remoteDescription: { readonly type: 'offer' | 'answer'; readonly sdp: string } | null
+  readonly localDescription: { readonly type: RTCSdpType; readonly sdp: string } | null
+  readonly remoteDescription: { readonly type: RTCSdpType; readonly sdp: string } | null
   /**
    * Null until a description is set. `maxMessageSize` is the remote description's
    * `a=max-message-size` (65536 when it has none), capped at 262144, the most this module sends.
    */
   readonly sctp: { readonly maxMessageSize: number } | null
   /** Does not fire for `close()`, as the platform. */
-  onconnectionstatechange: ((event: Event) => void) | null
+  onconnectionstatechange: Handler
   /** `channel` is the one the peer opened, already open. */
-  ondatachannel: ((event: Event & { channel: RTCDataChannel }) => void) | null
+  ondatachannel: Handler<Event & { channel: RTCDataChannel }>
   /** Fires twice after the local description is set: with the host candidate, then with null. */
-  onicecandidate: ((event: Event & { candidate: RTCIceCandidateInit | null }) => void) | null
-  onicegatheringstatechange: ((event: Event) => void) | null
+  onicecandidate: Handler<Event & { candidate: RTCIceCandidateInit | null }>
+  onicegatheringstatechange: Handler
   /**
    * Ordered and reliable only: `ordered: false`, `maxRetransmits`, `maxPacketLifeTime`,
    * `negotiated`, `id` and `protocol` throw NotSupportedError. Any number of channels, before the
@@ -129,8 +139,8 @@ export interface RTCPeerConnection extends EventTarget {
    */
   createDataChannel(label: string, init?: RTCDataChannelInit): RTCDataChannel
   /** Rejects with InvalidStateError when no data channel has been created: there is no media to offer. */
-  createOffer(): Promise<{ type: 'offer'; sdp: string }>
-  createAnswer(): Promise<{ type: 'answer'; sdp: string }>
+  createOffer(): Promise<RTCSessionDescriptionInit>
+  createAnswer(): Promise<RTCSessionDescriptionInit>
   /**
    * With no argument, sets the offer or the answer this connection makes. A description is
    * accepted only if it is that one: any other SDP rejects with InvalidModificationError.

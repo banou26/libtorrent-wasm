@@ -478,7 +478,9 @@ class shaped like `RTCPeerConnection`, whose every packet goes out through a UDP
 socket the caller hands it. The browser's own `RTCPeerConnection` sends its
 packets itself, from the device's address. With this one a peer sees the address
 of the socket, so code written against `RTCPeerConnection` can take either
-constructor.
+constructor. In TypeScript that code types the constructor as
+`WebRTC['RTCPeerConnection']`, which the platform's own fits too; the entry's
+does not fit `typeof RTCPeerConnection`, the type of the whole platform class.
 
 ```js
 import { createWebRTC } from 'libtorrent-wasm/webrtc'

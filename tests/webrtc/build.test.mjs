@@ -6,11 +6,12 @@
 // compiler for wasm. The crate depends on str0m with no feature and carries the provider itself.
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8')
 const manifest = read('webrtc/Cargo.toml')
@@ -99,6 +100,13 @@ test('the wasm names no directory of the machine that built it', () => {
     paths.filter((path) => !/^\/(rustc|cargo\/registry)\//.test(path)),
     [],
   )
+})
+
+test("the platform's own RTCPeerConnection fits the type of the entry's constructor", () => {
+  // rig/types/either.ts is code that takes either constructor, against the declarations as built
+  const path = (relative) => fileURLToPath(new URL(relative, import.meta.url))
+  const { status, stdout, stderr } = spawnSync(path('../../node_modules/.bin/tsc'), ['-p', path('./rig/types')], { encoding: 'utf8' })
+  assert.equal(status, 0, stdout + stderr)
 })
 
 test('the package ships the entry, its types and its wasm, and the entry imports nothing', () => {

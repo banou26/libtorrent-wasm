@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["DOM", "ESNext"],
+    "types": [],
+    "strict": true,
+    "noEmit": true
+  },
+  "files": ["either.ts"]
+}
