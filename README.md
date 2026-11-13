@@ -466,7 +466,7 @@ With `wasm` passed as a compiled `WebAssembly.Module`, a new factory compiles no
 | nothing | 5 s or 20 s | not while it was watched, 40 to 60 s: the download goes on over uTP alone | 0 of 8 |
 
 So the connections are not kept. A remote on libdatachannel ended its side 12.7 to 13.7 s into the silence (5
-runs), also when the relay was back by then; this stack failed a connection 22.9 to 23.2 s into it (4 runs);
+runs), also when the relay was back by then; this stack failed a connection 22.9 to 23.3 s into it (6 runs);
 and one that does last waits for SCTP's backed off resend. A new socket takes any port because a remote on this
 stack still routes the old address and port to its old connection until that one fails. The uTP bytes moved
 again 3.4 to 6.8 s after the relay was back, on the engine's own, in 56 of 57 runs with the ports kept; in one,
