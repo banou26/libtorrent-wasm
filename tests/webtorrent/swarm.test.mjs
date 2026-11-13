@@ -394,22 +394,35 @@ test('the watched torrent is served first: the others leave it ten of every sess
   assert.equal(await answeredOf(r, 3, 20), 10, 'the watched one takes what is left')
 })
 
-test('after the constructor is refused nothing is made for 60 s', async t => {
+test('a connection the class would not make is counted and no error, nothing more is asked of it until the next announce, which tries again', async t => {
   const r = rig(t, { rtc: fakeRtc({ capacity: 3 }), limits: { perMinute: 1000 } })
   await r.start(1)
-  const remote = new Remote(r)
-  assert.equal(r.rtc.stats.made, 0)
-  await remote.offer(1)
+  const unmade = () => r.peers.snapshot().unmade
+  await new Remote(r).offer(1)
   assert.equal(r.rtc.stats.made, 2, 'the remote’s and ours')
+  let changes = 0
+  r.peers.onchange = () => changes++
   await new Remote(r).offer(1)
   assert.equal(r.rtc.stats.made, 3, 'the remote’s; ours was refused')
-  const attempts = r.rtc.all.length
+  assert.equal(unmade(), 1, 'it is counted')
+  assert.ok(changes > 0, 'and onchange said so')
+
+  // The class has room again, and still nothing is asked of it: only an announce ends the wait.
   r.rtc.stats.made = -1000
-  await advance(t, 59 * SECOND, SECOND)
+  await advance(t, 100 * SECOND, SECOND)
   assert.equal(await answeredOf(r, 1, 3), 0)
-  await advance(t, 2 * SECOND, SECOND)
+  r.rtc.stats.made = 1000
+  r.tracker.phantoms = { complete: 2, incomplete: 0 }
+  await advance(t, 20 * SECOND, SECOND)
+  await settle()
+  assert.equal(r.plain(1).length, 2, 'the next announce went out')
+  assert.deepEqual([r.offered(1).length, unmade()], [0, 3], 'its two offers were tried, refused and counted')
+
+  r.rtc.stats.made = -1000
+  await advance(t, 120 * SECOND, SECOND)
+  await settle()
+  assert.deepEqual([r.offered(1).length, r.offered(1)[0]?.offers.length, unmade()], [1, 2, 3], 'and the announce after it makes them')
   assert.equal(await answeredOf(r, 1, 3), 3)
-  assert.ok(r.rtc.all.length > attempts)
 })
 
 test('a remote with an open channel is not answered again', async t => {
@@ -1043,6 +1056,7 @@ test('the snapshot says what each tracker last answered, what is pending and ope
   const nobody = r.peers.snapshot()
   assert.deepEqual(nobody, {
     dropped: 0,
+    unmade: 0,
     torrents: [{
       handle: 1,
       trackers: [{ url: TRACKER, connected: true, seeders: 0, leechers: 1, answeredAt: NOW, failure: null }],

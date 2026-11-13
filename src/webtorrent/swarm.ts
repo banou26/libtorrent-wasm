@@ -65,7 +65,6 @@ const QUIET_AFTER_CLOSE_MS = 60_000
 const QUIET_AFTER_SILENCE_MS = 600_000
 /** Remotes one torrent leaves alone at a time. Past it the oldest is forgotten. */
 const MAX_QUIET = 200
-const QUIET_AFTER_FULL_MS = 60_000
 /** With `relay`: how often a torrent's ordinary peers are read, and how many of their addresses it remembers. */
 const ORDINARY_EVERY_MS = 10_000
 const MAX_ORDINARY = 1000
@@ -117,6 +116,8 @@ export type Snapshot = {
   torrents: TorrentPeers[]
   /** Tracker messages that did not validate. */
   dropped: number
+  /** Connections the WebRTC class would not make: it had no slot then. Nothing more is made until the next announce. */
+  unmade: number
 }
 
 export type WebtorrentPeers = {
@@ -236,7 +237,9 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
   let live = 0
   let tokens = limits.perMinute
   let refilledAt = Date.now()
-  let quietUntil = 0
+  // The WebRTC class would not make a connection: nothing is asked of it again until an announce goes out.
+  let full = false
+  let unmade = 0
   let dropped = 0
   let notifying = false
   let closed = false
@@ -264,8 +267,8 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
 
   /** How many connections a torrent may make now. */
   const room = (t: Torrent): number => {
+    if (full) return 0
     const now = Date.now()
-    if (now < quietUntil) return 0
     tokens = Math.min(limits.perMinute, tokens + (now - refilledAt) * limits.perMinute / 60_000)
     refilledAt = now
     const reserve = RESERVE[rank(t.view)]
@@ -315,7 +318,10 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
   }
 
   const failed = (conn: Conn, error: unknown) => {
-    if (error instanceof LinksFull) quietUntil = Date.now() + QUIET_AFTER_FULL_MS
+    if (error instanceof LinksFull) {
+      full = true
+      unmade++
+    }
     remove(conn)
   }
 
@@ -510,6 +516,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       for (const announcing of t.announcing.values()) {
         if (now < announcing.nextAt || !announcing.tracker.connected) continue
         announcing.tracker.announce({ ...identity(t), event: announcing.started ? undefined : 'started', offers: [] })
+        full = false
         announcing.started = true
         announcing.offersDue = true
         announcing.sentAt = now
@@ -627,6 +634,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     },
     snapshot: () => ({
       dropped: [...trackers.values()].reduce((sum, tracker) => sum + tracker.dropped, dropped),
+      unmade,
       torrents: [...torrents.values()].map(t => {
         let open = 0
         for (const conn of t.conns) if (conn.state === 'open') open++
