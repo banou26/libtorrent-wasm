@@ -1157,6 +1157,35 @@ test('the engine\'s status decides what runs: a torrent that is paused, in error
   }
 })
 
+test('a torrent that checks while it runs keeps its channel and its place at the tracker, and makes and takes nothing new meanwhile', async t => {
+  const r = rig(t)
+  await r.start(1)
+  const remote = new Remote(r)
+  assert.equal(await remote.connect(1), true)
+  const said = r.tracker.announces(hashOf(1)).length
+  // what a pump can read for a moment when a magnet's metadata arrives, with the engine's peers all kept
+  r.session.set(1, { status: { state: 7 } })
+  r.peers.refresh()
+  await advance(t, 3 * SECOND)
+  assert.equal(remote.closes, 0, 'the channel of a torrent that checks was closed')
+  assert.equal(r.peers.snapshot().torrents[0].open, 1)
+  assert.equal(r.tracker.announces(hashOf(1)).length, said, 'a torrent that checks said something to its tracker')
+  assert.equal(await new Remote(r).connect(1), false, 'a torrent that checks took an offer')
+
+  // the next announce finds others to offer to, and still makes none
+  r.tracker.phantoms = { complete: 3, incomplete: 0 }
+  await advance(t, 120 * SECOND, SECOND)
+  assert.equal(r.tracker.announces(hashOf(1)).length, said + 1)
+  assert.equal(r.offered(1).length, 0, 'a torrent that checks made an offer')
+
+  r.session.set(1, { status: { state: 3 } })
+  r.peers.refresh()
+  assert.equal(await new Remote(r).connect(1), true, 'the check ended and an offer is still not taken')
+  await advance(t, 120 * SECOND, SECOND)
+  assert.equal(r.offered(1).length, 1, 'the check ended and the next announce made no offer')
+  assert.equal(remote.closes, 0)
+})
+
 test('a tracker is told the bytes still wanted and the payload of this session, as the engine counts them', async t => {
   const r = rig(t)
   await r.start(1, { status: { totalWanted: 5000, totalDone: 1200, sessionPayloadUpload: 70, sessionPayloadDownload: 90, allTimeUpload: 7000, allTimeDownload: 9000 } })

@@ -18,8 +18,10 @@ type View = {
   /** The v1 info hash as 40 hex characters, or the first 40 of a v2-only torrent's. */
   infoHash: string
   trackers: readonly string[]
-  /** Not paused by the person or by the queue, not checking, no error. */
+  /** Not paused by the person or by the queue, and no error. */
   running: boolean
+  /** The engine is checking what it holds. What it reports meanwhile is not what the torrent wants. */
+  checking: boolean
   hasMetadata: boolean
   /** Undefined until the metadata says. */
   private: boolean | undefined
@@ -42,7 +44,8 @@ const viewOf = (session: SwarmSession, handle: number): View | null => {
   return {
     infoHash,
     trackers: session.webSocketTrackers(handle),
-    running: !status.paused && status.errorCode === 0 && !CHECKING.includes(status.state),
+    running: !status.paused && status.errorCode === 0,
+    checking: CHECKING.includes(status.state),
     hasMetadata: status.hasMetadata,
     private: session.isPrivate(handle),
     // what libtorrent itself tells a tracker: the payload of this session
@@ -294,7 +297,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
 
   /** How many connections a torrent may make now. */
   const room = (t: Torrent): number => {
-    if (full) return 0
+    if (full || t.view.checking) return 0
     const now = Date.now()
     tokens = Math.min(limits.perMinute, tokens + (now - refilledAt) * limits.perMinute / 60_000)
     refilledAt = now
@@ -575,6 +578,15 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
     if (!view) memories.delete(handle)
     if (!view?.running) {
       if (t) stop(t)
+      return
+    }
+    // The engine checks for a moment when a magnet's metadata arrives, and keeps its peers meanwhile. A pump of
+    // 250 ms read that state in 2 of 7 downloads held to 50 KiB/s from a libtorrent 2.1 seed in Chrome 156
+    // (2026-11-13), and a torrent stopped for it lost the channel that had just brought the metadata. So a
+    // torrent is not started while it checks, and one that runs keeps what it has and makes nothing new
+    // (`room`) until the check ends.
+    if (view.checking) {
+      if (t) t.view.checking = true
       return
     }
     if (!t) {

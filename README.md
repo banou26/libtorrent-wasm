@@ -312,8 +312,10 @@ webtorrentPeers(session, {
   its own. A magnet whose private flag is not known yet is not announced to the passed ones until it is.
 - **A tracker name that is the person's own machine or network is never opened**: `localhost`, a name with no dot,
   `.local`, and loopback, private, shared and link-local addresses. A browser asks permission before such a socket.
-- **Only running torrents.** One that is paused, queued, checking or removed is told `stopped` and its attempts are
-  closed.
+- **Only running torrents.** One that is paused, queued, in error or removed is told `stopped` and its attempts
+  are closed. One that is checking is not started, and one that starts checking while it runs makes and takes
+  no new connection and keeps what it has: the engine checks for a moment when a magnet's metadata arrives,
+  with its peers kept, and closes them itself for a recheck.
 - **An empty swarm costs no connection.** The first announce carries no offer; offers follow the count in the
   tracker's reply, and a seeding torrent makes none and only answers.
 - **The first seconds wait for nothing.** The offers go out as soon as the first reply names somebody and their
@@ -404,7 +406,7 @@ them once a second, and at once when `refresh()` is called:
 | --- | --- |
 | `torrents()` | the handle of every torrent |
 | `infohash(handle)` | what it announces. Null until the session's alerts were pumped: the torrent waits |
-| `status(handle)` | whether the torrent runs (not paused, no error, not checking), whether its metadata is known, the bytes still wanted and the payload this session moved. Null until a status was pumped: the torrent waits |
+| `status(handle)` | whether the torrent runs (not paused, no error), whether it is checking, whether its metadata is known, the bytes still wanted and the payload this session moved. Null until a status was pumped: the torrent waits |
 | `isPrivate(handle)` | a private torrent is announced to its own trackers only, and so is one whose flag is not known yet |
 | `webSocketTrackers(handle)` | the torrent's own `ws` and `wss` trackers |
 | `hasStreamWindow(handle)` | a torrent somebody is reading is served before the others |

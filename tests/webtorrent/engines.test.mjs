@@ -8,7 +8,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test, { after } from 'node:test'
 
-import { offlineHost } from '../../build/index.js'
+import { TORRENT_STATE, offlineHost } from '../../build/index.js'
 import { rtcLinks, webtorrentPeers } from '../../build/webtorrent/index.js'
 import { bdecode, bencode, magnetFor } from '../rig/make-torrent.mjs'
 import { waitFor } from '../rig/peer-handshake.mjs'
@@ -50,27 +50,43 @@ const countedHost = () => {
   }
 }
 
-/** What the swarm reads of a session, with the one member that hands a stream over cut. */
-const takingNoStream = (session, cuts) => ({
-  torrents: () => session.torrents(),
-  infohash: (handle) => session.infohash(handle),
-  status: (handle) => session.status(handle),
-  isPrivate: (handle) => session.isPrivate(handle),
-  webSocketTrackers: (handle) => session.webSocketTrackers(handle),
-  hasStreamWindow: (handle) => session.hasStreamWindow(handle),
-  addPeerStream: (handle) => { cuts.push(handle); throw new Error('this session takes no stream') },
-})
+/**
+ * What the swarm reads of a session, with every stream it hands over recorded in `handed`. `cut` refuses
+ * each one. `checks` holds the state the engine passes through when a magnet's metadata arrives for half a
+ * second, which is how a pump that read it at that moment leaves it until its next round.
+ */
+const seenThrough = (session, handed, { cut = false, checks = false }) => {
+  const since = new Map()
+  return {
+    torrents: () => session.torrents(),
+    infohash: (handle) => session.infohash(handle),
+    status: (handle) => {
+      const status = session.status(handle)
+      if (!checks || !status?.hasMetadata) return status
+      if (!since.has(handle)) since.set(handle, Date.now())
+      return Date.now() - since.get(handle) < 500 ? { ...status, state: TORRENT_STATE.checkingResumeData } : status
+    },
+    isPrivate: (handle) => session.isPrivate(handle),
+    webSocketTrackers: (handle) => session.webSocketTrackers(handle),
+    hasStreamWindow: (handle) => session.hasStreamWindow(handle),
+    addPeerStream: (handle, socket) => {
+      handed.push(handle)
+      if (cut) throw new Error('this session takes no stream')
+      return session.addPeerStream(handle, socket)
+    },
+  }
+}
 
-/** An engine that can reach nothing, and a swarm over its session. `cut` gives the swarm a session that takes no stream. */
-const side = async (defer, dir, RTCPeerConnection, { cut = false } = {}) => {
+/** An engine that can reach nothing, and a swarm over its session, as it is or seen through `seenThrough`. */
+const side = async (defer, dir, RTCPeerConnection, through) => {
   const host = countedHost()
   const engine = await startEngine(defer, dir, { host })
-  const cuts = []
-  const peers = webtorrentPeers(cut ? takingNoStream(engine.session, cuts) : engine.session, {
+  const handed = []
+  const peers = webtorrentPeers(through ? seenThrough(engine.session, handed, through) : engine.session, {
     links: rtcLinks({ RTCPeerConnection, iceServers: [] }), WebSocket: Routed,
   })
   defer(() => peers.close())
-  return { ...engine, host, peers, cuts, of: (handle) => peers.snapshot().torrents.find((torrent) => torrent.handle === handle) }
+  return { ...engine, host, peers, handed, of: (handle) => peers.snapshot().torrents.find((torrent) => torrent.handle === handle) }
 }
 
 /** `from` holds the fixture and seeds it under `savePath`, and the tracker lists it. */
@@ -155,7 +171,7 @@ const cutOff = async (t, RTCPeerConnection) => {
   await seed(a, there, 'there')
   // several times what the transfer takes when the stream is handed over
   await assert.rejects(download(b, there, 'there', 8000), /timed out after 8000ms waiting for the download/)
-  assert.ok(b.cuts.length >= 1, 'the swarm never had a channel to hand over')
+  assert.ok(b.handed.length >= 1, 'the swarm never had a channel to hand over')
   const [handle] = b.session.torrents()
   assert.equal(b.session.status(handle).hasMetadata, false)
   assert.deepEqual(await b.session.peers(handle), [])
@@ -179,6 +195,24 @@ test('two engines that can reach nothing but each other\'s streams find each oth
 
 test('with a session that takes no stream the same download never starts: the streams are the only way', async (t) => {
   await cutOff(t, fakeRtc())
+})
+
+test('a download whose session reports a check as its metadata arrives keeps the channel that brought it', async (t) => {
+  const defer = teardown(t)
+  const reference = await referenceTracker(t)
+  if (!reference) return t.skip('bittorrent-tracker is not installed')
+  Routed = routedWebSocket(reference.url)
+  const RTCPeerConnection = fakeRtc()
+  const there = fixture(defer, 4 * MiB)
+  const a = await side(defer, path.join(there.root, 'a'), RTCPeerConnection)
+  const b = await side(defer, path.join(there.root, 'b'), RTCPeerConnection, { checks: true })
+  // slow enough that the swarm reads the session while the download is under way
+  b.session.setRateLimits({ download: MiB })
+  await seed(a, there, 'there')
+  // a swarm that stopped the torrent for the check closed its only channel, and the seed then left it alone for a minute
+  const { handle } = await download(b, there, 'there', 20_000)
+  assert.equal(savedSha256(b, handle), there.sha256)
+  assert.deepEqual(b.handed, [handle], 'the download took more than the one stream it began on')
 })
 
 test('libdatachannel: the same two engines over real ICE, DTLS and SCTP on this machine', { skip: !nativeRtc && 'node-datachannel did not load' }, async (t) => {
