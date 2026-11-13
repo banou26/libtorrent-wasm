@@ -1,5 +1,6 @@
-// A process that node-datachannel keeps alive for good, run by links.test.mjs: `node native-held.mjs hold`
-// stays, and `node native-held.mjs release` calls what the test files call when they are done, and ends.
+// A process that node-datachannel keeps alive for good, run by links.test.mjs. `node native-held.mjs release`
+// calls what the test files call when they are done, and ends with code 0. `node native-held.mjs hold` does
+// not, is still there 3 s later, and ends itself with code 3.
 //
 // It gets there the one way that happens every time: the offering end closes its channel while this thread
 // is kept busy, so the answering end's channel is already closed, natively, when the thread hears of it, and
@@ -51,4 +52,5 @@ theirs.close()
 a.close()
 b.close()
 if (process.argv[2] === 'release') await releaseNativeRtc()
-console.log('done')
+// It does not keep the process alive, so it only runs when something else still does.
+setTimeout(() => process.exit(3), 3000).unref()

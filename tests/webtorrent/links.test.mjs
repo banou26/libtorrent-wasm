@@ -488,24 +488,17 @@ test('libdatachannel: both ends open, 2 MiB cross each way intact, early bytes a
 })
 
 test('libdatachannel: a process the native module would keep alive for good ends by itself once releaseNativeRtc has run', { skip: !nativeRtc && 'node-datachannel did not load' }, async () => {
-  /** How one run of native-held.mjs ended. It is ended here `ms` after it said done, or 30 s after it started. */
-  const ending = (mode, ms) => new Promise(resolve => {
+  /** How one run of native-held.mjs ended: with its own code, or ended here 30 s after it started. */
+  const ending = mode => new Promise(resolve => {
     const fixture = fileURLToPath(new URL('./native-held.mjs', import.meta.url))
-    const child = spawn(process.execPath, [fixture, mode], { stdio: ['ignore', 'pipe', 'inherit'] })
-    const stop = () => child.kill('SIGKILL')
-    let done = false
-    let timer = setTimeout(stop, 30_000)
-    child.stdout.once('data', () => {
-      done = true
-      clearTimeout(timer)
-      timer = setTimeout(stop, ms)
-    })
+    const child = spawn(process.execPath, [fixture, mode], { stdio: ['ignore', 'ignore', 'inherit'] })
+    const late = setTimeout(() => child.kill('SIGKILL'), 30_000)
     child.once('exit', (code, signal) => {
-      clearTimeout(timer)
-      resolve(`${done ? 'done' : 'not done'}, ${signal ? 'ended here' : `ended by itself with code ${code}`}`)
+      clearTimeout(late)
+      resolve(signal ? 'ended here' : `code ${code}`)
     })
   })
-  const [released, held] = await Promise.all([ending('release', 10_000), ending('hold', 2000)])
-  assert.equal(held, 'done, ended here', 'the control: without the release the same process is still there 2 s after it was done')
-  assert.equal(released, 'done, ended by itself with code 0')
+  const [released, held] = await Promise.all([ending('release'), ending('hold')])
+  assert.equal(held, 'code 3', 'the control: without the release the same process is still held 3 s after it was done')
+  assert.equal(released, 'code 0')
 })
