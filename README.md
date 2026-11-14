@@ -232,9 +232,8 @@ first one did.
 
 Asked from inside a call the engine makes from its tick, a storage method or a
 host socket hook, `destroy()` ends the session once that tick has returned,
-before anything else runs. The tick goes on using the session after the call,
-and a session ended under it crashed the engine (`memory access out of
-bounds`).
+before anything else runs. Until then the tick goes on, and can still call the
+storage.
 
 What libtorrent would go on to wait for is dropped: a uTP socket's resends, a
 peer's bandwidth quota, and the `stopped` announce to each HTTP tracker the
