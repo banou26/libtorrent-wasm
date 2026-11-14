@@ -192,6 +192,21 @@ test('a save for a torrent the session does not hold is refused at once', async 
   }
 })
 
+test('a save asked and then a remove in the same turn is refused at the remove', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const { session, running } = await engineHolding(defer, fx)
+
+  const added = session.addMagnet(magnetFor(HASH_A, 'a'), '/dl')
+  const held = await running(session.addTorrentFile(fx.meta.torrent, '/dl'))
+  const answers = [added, held].map((handle) => {
+    const saving = session.saveResumeData(handle, 3000).then(() => 'saved', () => 'refused')
+    session.removeTorrent(handle)
+    return Promise.race([saving, sleep(500).then(() => 'waiting')])
+  })
+  assert.deepEqual(await Promise.all(answers), ['refused', 'refused'])
+})
+
 test('every command takes a handle from its add, and answers -1, as a remove does, for one never given out', async (t) => {
   const defer = teardown(t)
   const fx = fixture(defer, MiB)

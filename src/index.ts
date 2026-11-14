@@ -681,12 +681,18 @@ export class Session {
   /**
    * Remove a torrent, and with `deleteFiles` its files, on the next tick. That holds from the add
    * that returned the handle, before any alert was pumped, and an add of the same torrent asked for
-   * after it then stands. False when the engine never gave this handle out.
+   * after it then stands. A save still waiting for its answer is refused. False when the engine
+   * never gave this handle out.
    */
   removeTorrent(handle: number, deleteFiles = false): boolean {
     const removed = this.mod._lt_session_remove_torrent_ex(handle, deleteFiles ? 1 : 0) === 0
     // before the bitfield goes, or a parked read can never be satisfied and never rejected either
     this.failPieceWaiters(new Error(`read: torrent ${handle} was removed`), handle)
+    // the answer to a save asked before the remove is dropped by the alert pass, which no longer knows the torrent
+    this.resumeWaiters = this.resumeWaiters.filter(w => {
+      if (w.handle !== handle) return true
+      clearTimeout(w.timer); w.reject(new Error(`save_resume_data: torrent ${handle} was removed`)); return false
+    })
     this.handles.delete(handle)
     this.windows.delete(handle)
     this.filesByHandle.delete(handle)
