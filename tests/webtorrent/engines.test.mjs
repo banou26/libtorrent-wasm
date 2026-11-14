@@ -9,7 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test, { after } from 'node:test'
 
-import { PRIORITY, offlineHost } from '../../build/index.js'
+import { PRIORITY, TORRENT_FLAG, offlineHost } from '../../build/index.js'
 import { rtcLinks, webtorrentPeers } from '../../build/webtorrent/index.js'
 import { bdecode, bencode, magnetFor, makeTorrent } from '../rig/make-torrent.mjs'
 import { waitFor } from '../rig/peer-handshake.mjs'
@@ -147,6 +147,31 @@ const backAtOnce = async (t, RTCPeerConnection) => {
   assert.equal(savedSha256(b, handle), there.sha256)
 }
 
+// ripple's held download page: added in upload mode, which drops the seed once the metadata is in, and let go of it
+const heldAndLetGo = async (t, RTCPeerConnection) => {
+  const defer = teardown(t)
+  const reference = await referenceTracker(t)
+  if (!reference) return t.skip('bittorrent-tracker is not installed')
+  Routed = routedWebSocket(reference.url)
+  const there = fixture(defer, 4 * MiB)
+  const a = await side(defer, path.join(there.root, 'a'), RTCPeerConnection)
+  const b = await side(defer, path.join(there.root, 'b'), RTCPeerConnection, {})
+  await seed(a, there, 'there')
+  const handle = b.session.addMagnet(magnetOf(there), '/there')
+  // as ripple holds one: the add run and registered first, or the flag lands on nothing
+  b.session.tick()
+  b.alerts.push(...b.session.popAlerts().map((alert) => alert.message))
+  b.session.setFlags(handle, TORRENT_FLAG.uploadMode, TORRENT_FLAG.uploadMode)
+  await b.running(handle)
+  await waitFor('the hold', () => b.session.status(handle).flags & TORRENT_FLAG.uploadMode)
+  await waitFor('the metadata, and the seed dropped', () => b.session.status(handle)?.hasMetadata && b.handed.length === 1 && b.of(handle)?.open === 0)
+  assert.equal(b.session.status(handle).totalWantedDone, 0)
+  b.session.setFlags(handle, 0, TORRENT_FLAG.uploadMode)
+  await waitFor('a channel again', () => b.of(handle)?.open === 1, 10_000)
+  await finished(b, handle, 20_000)
+  assert.equal(savedSha256(b, handle), there.sha256)
+}
+
 const silentStays = async (t, RTCPeerConnection) => {
   const run = await pausedAndResumed(t, RTCPeerConnection, { cut: true })
   if (!run) return t.skip('bittorrent-tracker is not installed')
@@ -182,6 +207,10 @@ test('a download paused once its channel is open and resumed has its seed back a
 
 test('a seed that never spoke is still left alone after the download that saw it is paused and resumed', async (t) => {
   await silentStays(t, fakeRtc())
+})
+
+test('a download held in upload mode, which drops its seed at the metadata, has the seed back at once when let go, and finishes', async (t) => {
+  await heldAndLetGo(t, fakeRtc())
 })
 
 test('a magnet that names no tracker finds its seed through a tracker the caller passed, and downloads', async (t) => {
@@ -366,4 +395,8 @@ test('libdatachannel: with a session that takes no stream the download never sta
 
 test('libdatachannel: a download paused and resumed has its seed back at once', { skip: !nativeRtc && 'node-datachannel did not load' }, async (t) => {
   await backAtOnce(t, nativeRtc.RTCPeerConnection)
+})
+
+test('libdatachannel: a download let go of upload mode has its seed back at once', { skip: !nativeRtc && 'node-datachannel did not load' }, async (t) => {
+  await heldAndLetGo(t, nativeRtc.RTCPeerConnection)
 })

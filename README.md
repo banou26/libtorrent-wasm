@@ -574,7 +574,9 @@ once more, and each remote keeps its end of the old connection until its own sta
   arrives, with its peers kept, and closes them itself for a recheck.
 - **A torrent that runs again has its peers back at once.** It runs under a new tracker id, since each remote
   leaves the id whose channel closed alone for 60 s, and leaves alone only the remotes that stayed silent, so a
-  pause and a resume cost no wait for the tracker's next interval.
+  pause and a resume cost no wait for the tracker's next interval. A download that leaves upload mode with its
+  metadata in starts again the same way: libtorrent drops every seed of a torrent in upload mode once the
+  metadata is in, and dials its own peers again when the mode ends.
 - **An empty swarm costs no connection.** The first announce carries no offer; offers follow the count in the
   tracker's reply, and a seeding torrent makes none and only answers.
 - **The first seconds wait for nothing.** The offers go out as soon as the first reply names somebody and their
@@ -638,7 +640,7 @@ once more, and each remote keeps its end of the old connection until its own sta
 | an answered attempt that has not opened | closed after 30 s |
 | an open channel nothing reads | closed after 10 s |
 | an attempt whose description never comes | given up after 10 s |
-| a remote whose channel closed | not answered for 60 s, or until the torrent runs again after a stop |
+| a remote whose channel closed | not answered for 60 s, or until the torrent starts again |
 | a remote whose channel opened and ended before it had sent a byte | not answered, and its answers not taken, for 10 min |
 | remotes a torrent leaves alone at one time | 200, then the oldest is forgotten |
 | with `relay`, a channel whose remote address is or was an ordinary peer of the torrent in this session | closed |
@@ -665,7 +667,7 @@ them once a second, and at once when `refresh()` is called:
 | --- | --- |
 | `torrents()` | the handle of every torrent |
 | `infohash(handle)` | what it announces. Null until the session's alerts were pumped: the torrent waits |
-| `status(handle)` | whether the torrent runs (not paused, no error), whether it is checking, whether its metadata is known, the bytes still wanted and the payload this session moved. Null until a status was pumped: the torrent waits |
+| `status(handle)` | whether the torrent runs (not paused, no error), whether it is checking, whether it is in upload mode, whether its metadata is known, the bytes still wanted and the payload this session moved. Null until a status was pumped: the torrent waits |
 | `isPrivate(handle)` | a private torrent is announced to its own trackers only, and with `relay` so is one whose flag is not known yet |
 | `webSocketTrackers(handle)` | the torrent's own `ws` and `wss` trackers |
 | `hasStreamWindow(handle)` | a torrent somebody is reading is served before the others. A window planned with `deadlines: false`, a save, is not that |

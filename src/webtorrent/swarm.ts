@@ -22,6 +22,8 @@ type View = {
   running: boolean
   /** The engine is checking what it holds. What it reports meanwhile is not what the torrent wants. */
   checking: boolean
+  /** Uploads only: libtorrent drops every seed once the metadata is in. */
+  uploadMode: boolean
   hasMetadata: boolean
   /** Undefined until the metadata says. */
   private: boolean | undefined
@@ -35,6 +37,8 @@ type View = {
 
 // torrent_status::state_t, the engine's TORRENT_STATE.checkingFiles and checkingResumeData
 const CHECKING = [1, 7]
+// torrent_flags::upload_mode, the engine's TORRENT_FLAG.uploadMode
+const UPLOAD_MODE = 1 << 1
 
 /** Null while the session has nothing to say of the torrent: it is gone, or none of its status was pumped yet. */
 const viewOf = (session: SwarmSession, handle: number): View | null => {
@@ -46,6 +50,7 @@ const viewOf = (session: SwarmSession, handle: number): View | null => {
     trackers: session.webSocketTrackers(handle),
     running: !status.paused && status.errorCode === 0,
     checking: CHECKING.includes(status.state),
+    uploadMode: (status.flags & UPLOAD_MODE) !== 0,
     hasMetadata: status.hasMetadata,
     private: session.isPrivate(handle),
     // what libtorrent itself tells a tracker: the payload of this session
@@ -620,6 +625,12 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
         leave(t, wanted)
       }
       return
+    }
+    // libtorrent dials its own peers again when a torrent leaves upload mode (torrent::set_upload_mode): a download
+    // that leaves it with its metadata in starts again, for the seeds the mode dropped.
+    if (t?.view.uploadMode && !view.uploadMode && view.hasMetadata && !seeding(view)) {
+      stop(t)
+      t = undefined
     }
     if (!t) {
       const memory = memories.get(handle) ?? { quiet: new Map(), ordinary: new Set() }

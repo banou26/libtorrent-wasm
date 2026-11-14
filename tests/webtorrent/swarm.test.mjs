@@ -830,6 +830,42 @@ test('a torrent that runs again after a pause answers at once the remotes whose 
   for (const remote of remotes) assert.equal(await remote.connect(1), true)
 })
 
+const UPLOAD_MODE = 1 << 1
+
+test('a download that leaves upload mode with its metadata in starts again under a new id, and answers at once the remote the mode closed', async t => {
+  const r = rig(t)
+  await r.start(1, { status: { flags: UPLOAD_MODE } })
+  const remote = new Remote(r)
+  assert.equal(await remote.connect(1), true)
+  remote.sockets[0].write(Buffer.of(19))
+  await settle()
+  // libtorrent drops a seed of a torrent in upload mode once the metadata is in
+  r.session.streams[0].socket.destroy()
+  await settle()
+  r.session.set(1, { status: { flags: 0 } })
+  r.peers.refresh()
+  await settle()
+  const announces = r.tracker.announces(hashOf(1))
+  assert.deepEqual(announces.map(message => message.event), ['started', 'stopped', 'started'])
+  assert.notEqual(announces[2].peer_id, announces[0].peer_id)
+  assert.equal(await remote.connect(1), true)
+})
+
+test('a magnet that leaves upload mode before its metadata, and a seed that leaves it, keep their channels and their id', async t => {
+  const r = rig(t)
+  await r.start(1, { hasMetadata: false, status: { flags: UPLOAD_MODE } })
+  await r.start(2, { left: 0, status: { flags: UPLOAD_MODE } })
+  const remotes = [new Remote(r), new Remote(r)]
+  assert.equal(await remotes[0].connect(1), true)
+  assert.equal(await remotes[1].connect(2), true)
+  for (const handle of [1, 2]) r.session.set(handle, { status: { flags: 0 } })
+  r.peers.refresh()
+  await settle()
+  for (const handle of [1, 2]) assert.deepEqual(r.tracker.announces(hashOf(handle)).map(message => message.event), ['started'])
+  assert.deepEqual(r.peers.snapshot().torrents.map(torrent => torrent.open), [1, 1])
+  assert.deepEqual(remotes.map(remote => remote.closes), [0, 0])
+})
+
 test('a silent remote is still left alone after its torrent was paused and resumed', async t => {
   const r = rig(t)
   await r.start(1)
