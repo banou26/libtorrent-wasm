@@ -1,5 +1,7 @@
 // Run from a Worker. Calling this from the main thread will throw.
 
+import { createSyncAccessHandle } from '@banou/ponyfill/file-system'
+
 import type { StorageBackend } from './types'
 
 interface StorageEntry {
@@ -175,8 +177,7 @@ export class OPFSStorage implements StorageBackend {
     for (const s of segments) {
       dir = await dir.getDirectoryHandle(s, { create: true })
     }
-    const fileHandle = await dir.getFileHandle(name, { create: true })
-    const h = await (fileHandle as any).createSyncAccessHandle() as FileSystemSyncAccessHandle
+    const h = await createSyncAccessHandle<FileSystemSyncAccessHandle>(await dir.getFileHandle(name, { create: true }) as any)
     e.files.set(fileIndex, h)
     return h
   }
