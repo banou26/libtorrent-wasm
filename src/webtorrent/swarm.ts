@@ -607,6 +607,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       if (t) stop(t)
       return
     }
+    const wanted = trackersFor(view, defaults, relay)
     // The engine checks for a moment when a magnet's metadata arrives, and keeps its peers meanwhile. A pump of
     // 250 ms read that state in 2 of 7 downloads held to 50 KiB/s from a libtorrent 2.1 seed in Chrome 156
     // (2026-11-13), and a torrent stopped for it lost the channel that had just brought the metadata. So a
@@ -616,7 +617,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       if (t) {
         t.view.checking = true
         // The private flag is the metadata's and waits for no check.
-        leave(t, trackersFor(view, defaults, relay))
+        leave(t, wanted)
       }
       return
     }
@@ -632,7 +633,6 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       changed()
     }
 
-    const wanted = trackersFor(view, defaults, relay)
     for (const url of wanted) {
       if (t.announcing.has(url)) continue
       t.announcing.set(url, {
