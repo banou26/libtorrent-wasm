@@ -1,5 +1,6 @@
-// A tracker row reads failed when its tracker fails and working when it answers, on every kind of
-// torrent. Every tracker is on this machine, and the host lets nothing else out and looks no name up.
+// A tracker row reads failed when its tracker fails, working when it answers, and not contacted when
+// nobody asked it, on every kind of torrent and after a reannounce, a pause and a resume. Every
+// tracker is on this machine, and the host lets nothing else out and looks no name up.
 
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
@@ -26,8 +27,12 @@ const KINDS = [
 
 // libtorrent announces to a loopback http tracker only when its path is exactly /announce
 const httpTracker = (defer, body) => new Promise((resolve) => {
-  const tracker = { asked: 0 }
-  const server = http.createServer((req, res) => { tracker.asked++; res.end(typeof body === 'function' ? body(req) : body) })
+  const tracker = { asked: 0, events: [] }
+  const server = http.createServer((req, res) => {
+    tracker.asked++
+    tracker.events.push(/[?&]event=([a-z]+)/.exec(req.url)?.[1] ?? 'none')
+    res.end(typeof body === 'function' ? body(req) : body)
+  })
   defer(() => { server.closeAllConnections(); server.close() })
   server.listen(0, '127.0.0.1', () => resolve(Object.assign(tracker, { url: `http://127.0.0.1:${server.address().port}/announce` })))
 })
@@ -124,5 +129,48 @@ for (const answers of ['v1', 'v2']) {
     const [row] = await rowsWhen(session, handle, ([r]) => r && !r.updating)
     assert.equal(row.fails, 0, `answered the ${answers} hash and reads ${row.fails} failures: ${row.message}`)
     assert.equal(row.verified, true)
+  })
+}
+
+// A forced reannounce gives every tracker a slot, asked or not, and a resume clears what libtorrent
+// knows of the started announces. The reannounce asks the refusing tracker again at once, and the
+// answering one only after its min interval, so the refusing one is what shows it has run.
+for (const { kind, xt, slots } of KINDS) {
+  test(`${kind}: a tracker nobody asked reads not contacted after a reannounce, a pause and a resume`, async (t) => {
+    const defer = teardown(t)
+    const refusing = await httpTracker(defer, REFUSAL)
+    const answering = await httpTracker(defer, ANSWER)
+    const unasked = await httpTracker(defer, ANSWER)
+    const { session, running } = await startEngine(defer, tempDir(defer), { host: countingHost() })
+    const urls = [refusing.url, answering.url, unasked.url]
+    const handle = await running(session.addMagnet(`magnet:?${xt()}${urls.map((url) => `&tr=${encodeURIComponent(url)}`).join('')}`, '/dl'))
+    const events = (name) => answering.events.filter((event) => event === name).length
+
+    const check = async (step) => {
+      const rows = await rowsWhen(session, handle, (list) => list.length === urls.length && list.every((r) => !r.updating))
+      const row = (url) => rows.find((r) => r.url === url)
+      const shown = JSON.stringify(rows.map(({ url, fails, verified }) => ({ url, fails, verified })))
+      assert.ok(row(refusing.url).fails > 0, `${step}: the refusing tracker reads ${row(refusing.url).fails} failures: ${shown}`)
+      assert.equal(row(answering.url).fails, 0, `${step}: the tracker that answered reads failures: ${shown}`)
+      assert.equal(row(answering.url).verified, true, `${step}: ${shown}`)
+      assert.equal(unasked.asked, 0, `${step}: the tracker after the answering one was asked`)
+      assert.equal(row(unasked.url).fails, -1, `${step}: a tracker nobody asked reads as asked: ${shown}`)
+    }
+
+    await waitFor('every slot to reach the answering tracker', () => events('started') >= slots)
+    await check('added')
+
+    const refused = refusing.asked
+    session.forceReannounce(handle)
+    await waitFor('the reannounce', () => refusing.asked >= refused + slots)
+    await check('reannounced')
+
+    session.pauseTorrent(handle)
+    await waitFor('the stopped announces', () => events('stopped') >= slots)
+    await check('paused')
+
+    session.resumeTorrent(handle)
+    await waitFor('the started announces again', () => events('started') >= 2 * slots)
+    await check('resumed')
   })
 }
