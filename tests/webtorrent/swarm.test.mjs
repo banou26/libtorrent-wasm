@@ -660,12 +660,12 @@ test('a remote left alone for those 60 s still has its answer to an offer of our
 
 /**
  * A download 51 s in, at a tracker that counts one peer who is not there, so it has somebody to offer to, and
- * that asks an interval of 600 s, so no announce of its own offers in the minutes that follow. Its first offer,
- * to nobody, was closed unanswered at 50 s.
+ * that asks an interval of `interval` seconds, by default 600 so that no announce of its own offers in the
+ * minutes that follow. Its first offer, to nobody, was closed unanswered at 50 s.
  */
-const lonely = async t => {
+const lonely = async (t, interval = 600) => {
   const r = rig(t)
-  r.tracker.interval = 600
+  r.tracker.interval = interval
   r.tracker.phantoms = { complete: 1, incomplete: 0 }
   await r.start(1)
   await advance(t, 51 * SECOND, SECOND)
@@ -680,6 +680,7 @@ const lose = async (r, { silent = false } = {}) => {
   await settle()
   remote.sockets[0].destroy()
   await settle()
+  return remote
 }
 
 /** Connections made, and announces of the download that carried offers. */
@@ -693,6 +694,25 @@ test('a download whose open channel closed offers again 65 s after the close, wh
   assert.deepEqual(madeAndOffered(r), [made, offered], 'the remote leaves our id alone for 60 s from when it saw the close, until its next beat')
   await advance(t, 2 * SECOND, SECOND)
   assert.deepEqual(madeAndOffered(r), [made + 1, offered + 1])
+})
+
+test('an offer made just before the early round, its answer coming after the round, still opens a channel', async t => {
+  const r = await lonely(t, 60)
+  await advance(t, 5 * SECOND, SECOND)
+  const remote = await lose(r)
+  // the tracker's announce at 120 s offers 64 s after the close, a second before the early round
+  await advance(t, 64.5 * SECOND, SECOND)
+  const offered = r.offered(1).length
+  const [late] = r.offered(1).at(-1).offers
+  const answer = await remote.links.answer(late.offer.sdp)
+  remote.watch(answer.link)
+  await advance(t, SECOND, SECOND)
+  await settle()
+  assert.equal(r.offered(1).length, offered + 1, 'the early round offers, whatever waits for an answer')
+  remote.relay(1, late.offer_id, { answer: { type: 'answer', sdp: answer.sdp } })
+  await settle()
+  assert.equal(r.session.streams.length, 2)
+  await advance(t, CLOSING)
 })
 
 test('a remote that closed its channel without a byte brings no early offer: it is left alone ten minutes', async t => {
