@@ -7,6 +7,8 @@
 //   pex      a peer on a stream serves the metadata and names four peers in peer exchange
 //   remove   one peer, and the torrent removed in the same turn as the destroy
 //   limited  a download under a ceiling from a seed engine over uTP; the mark is the first byte
+//   in-write a download from a loopback peer over tcp, destroyed from inside the storage's first write after the mark,
+//            which the engine makes from inside its own tick; the mark is the torrent started
 //
 // The named peers are in TEST-NET-3, whose datagrams the host drops, so each connect stays in progress until uTP
 // gives up and the engine tries TCP instead, about 4 s after its first SYN.
@@ -63,6 +65,28 @@ class CountingStorage extends NodeFSStorage {
   stop(id) { this.released.push(id); return super.stop(id) }
   release(id) { this.released.push(id); return super.release(id) }
   onRemoveStorage(id) { this.removed.push(id); return super.onRemoveStorage(id) }
+  onWrite = () => {}
+  write(...args) { const written = super.write(...args); this.onWrite(); return written }
+}
+
+/** A torrent and a peer on loopback that serves it over tcp. */
+const loopbackSeed = async (name) => {
+  const file = path.join(root, name)
+  writeFixture(file, 2 * 1024 * 1024, crypto.randomInt(1, 2 ** 31))
+  const bytes = fs.readFileSync(file)
+  const meta = makeTorrent({ file, pieceLength: 64 * 1024 })
+  const accepted = []
+  const server = net.createServer((socket) => {
+    accepted.push(socket)
+    const serve = (piece, offset, length) => bytes.subarray(piece * meta.pieceLength + offset, piece * meta.pieceLength + offset + length)
+    new ScriptedPeer({ infoHash: meta.infoHash, socket, serve }).connect().catch(() => {})
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const close = () => new Promise((resolve) => {
+    for (const socket of accepted) socket.destroy()
+    server.close(resolve)
+  })
+  return { meta, bytes, port: server.address().port, close }
 }
 
 const start = async (dir, host, options = {}) => {
@@ -90,17 +114,16 @@ const start = async (dir, host, options = {}) => {
 }
 
 /**
- * Destroys the engine. `storages` holds the ids of the storages it made, of those the destroy stopped or released, and
- * of those it removed, sorted.
+ * Destroys the engine through `ask`. `storages` holds the ids of the storages it made, of those the destroy stopped or
+ * released, and of those it removed, sorted.
  */
-const destroyed = ({ session, storage }, before = () => {}) => {
+const destroyed = async ({ session, storage }, ask = () => session.destroy()) => {
   const t0 = performance.now()
   const releasedBefore = storage.released.length
   const removedBefore = storage.removed.length
   let outcome = 'clean'
   try {
-    before()
-    session.destroy()
+    await ask()
   } catch (error) {
     outcome = /Aborted/.test(String(error)) ? 'abort' : String(error).slice(0, 200)
   }
@@ -123,6 +146,7 @@ let a
 let handle
 let named = []
 let transport
+let source
 if (variant === 'limited') {
   const file = path.join(root, 'seed', 'limited.bin')
   writeFixture(file, 32 * 1024 * 1024, crypto.randomInt(1, 2 ** 31))
@@ -148,6 +172,10 @@ if (variant === 'limited') {
   await waitFor('the engine to take peer exchange', () => peer.enginePexId)
   named = ['203.0.113.70', '203.0.113.71', '203.0.113.72', '203.0.113.73']
   peer.sendPex(named.map((address) => `${address}:6881`))
+} else if (variant === 'in-write') {
+  source = await loopbackSeed('in-write.bin')
+  a = await start(path.join(root, 'a'), hostA)
+  handle = await a.running(a.session.addTorrentFile(source.meta.torrent, '/dl'))
 } else {
   a = await start(path.join(root, 'a'), hostA)
   named = Array.from({ length: variant === 'four' ? 4 : 1 }, (_, i) => `203.0.113.${50 + i}`)
@@ -157,42 +185,46 @@ if (variant === 'limited') {
 await waitFor('a SYN to each named peer', () => named.every((address) => hostA.datagrams.some((d) => d.address === address)), 10_000)
 await sleep(ms)
 a.stop()
-const first = { connects: hostA.connects.length, transport, ...destroyed(a, () => { if (variant === 'remove') a.session.removeTorrent(handle) }) }
+const ask = {
+  remove: () => { a.session.removeTorrent(handle); a.session.destroy() },
+  'in-write': () => new Promise((resolve, reject) => {
+    a.storage.onWrite = () => {
+      a.storage.onWrite = () => {}
+      try { a.session.destroy() } catch (error) { reject(error); return }
+      // the storages are read once the tick that made this write has returned
+      setTimeout(resolve)
+    }
+    dialTcp(a.session, handle, '127.0.0.1', source.port)
+  }),
+}[variant]
+const first = { connects: hostA.connects.length, transport, ...await destroyed(a, ask) }
 if (seed) {
   seed.stop()
-  first.seed = destroyed(seed)
+  first.seed = await destroyed(seed)
 }
-await waitFor('the first session\'s sockets to close', () => hostA.open().length + seedHost.open().length === 0, 2000).catch(() => {})
+await source?.close()
+// what keeps this process alive, the destroyed session's part of it included; stdio is this script's own. A handle
+// closing and a 16 ms tick timer go within a turn or two, so both are read once settled or after 2 s.
+const holding = () => process.getActiveResourcesInfo().filter((r) => r !== 'TTYWrap' && r !== 'PipeWrap')
+await waitFor('the first session to let go', () => hostA.open().length + seedHost.open().length === 0 && !holding().length, 2000).catch(() => {})
 first.open = [...hostA.open(), ...seedHost.open()]
-// what keeps this process alive, the destroyed session's part of it included; stdio is this script's own
-first.resources = process.getActiveResourcesInfo().filter((r) => r !== 'TTYWrap' && r !== 'PipeWrap')
+first.resources = holding()
 
 // the second session, in the same process, takes a torrent from a peer on loopback over tcp
-const file = path.join(root, 'seed.bin')
-writeFixture(file, 2 * 1024 * 1024, crypto.randomInt(1, 2 ** 31))
-const bytes = fs.readFileSync(file)
-const meta = makeTorrent({ file, pieceLength: 64 * 1024 })
-const accepted = []
-const server = net.createServer((socket) => {
-  accepted.push(socket)
-  const serve = (piece, offset, length) => bytes.subarray(piece * meta.pieceLength + offset, piece * meta.pieceLength + offset + length)
-  new ScriptedPeer({ infoHash: meta.infoHash, socket, serve }).connect().catch(() => {})
-})
-await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+const seedB = await loopbackSeed('seed.bin')
 const SEED = '198.51.100.20'
 const hostB = trackedHost({ routes: { [SEED]: '127.0.0.1' } })
 const b = await start(path.join(root, 'b'), hostB)
-const hb = await b.running(b.session.addTorrentFile(meta.torrent, '/dl'))
-dialTcp(b.session, hb, SEED, server.address().port)
+const hb = await b.running(b.session.addTorrentFile(seedB.meta.torrent, '/dl'))
+dialTcp(b.session, hb, SEED, seedB.port)
 await waitFor('the second session\'s download', () => done(b.session, hb), 20_000)
 const saved = fs.readFileSync(b.storage.filePath(b.session.files(hb).storageIndex, 0))
 b.stop()
 const second = {
-  sameBytes: saved.equals(bytes),
-  ...destroyed(b),
+  sameBytes: saved.equals(seedB.bytes),
+  ...await destroyed(b),
 }
-for (const socket of accepted) socket.destroy()
-server.close()
+await seedB.close()
 await waitFor('the second session\'s sockets to close', () => hostB.open().length === 0, 2000).catch(() => {})
 second.open = hostB.open()
 fs.rmSync(root, { recursive: true, force: true })

@@ -1,7 +1,7 @@
 // destroy() is clean, releases and removes each storage, leaves no socket or handle, and a second session works,
-// with a uTP peer still in its connect (one, four, pex, remove) or connected under a download ceiling (limited), each
-// run a process of its own (tests/rig/destroy-engine.mjs) that has to end by itself; and a resume save it cuts short
-// settles.
+// with a uTP peer still in its connect (one, four, pex, remove), connected under a download ceiling (limited), or asked
+// from inside a storage write the engine's tick made (in-write), each run a process of its own
+// (tests/rig/destroy-engine.mjs) that has to end by itself; and a resume save it cuts short settles.
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
@@ -14,7 +14,7 @@ const SCRIPT = path.join(import.meta.dirname, 'rig', 'destroy-engine.mjs')
 // ms after the mark: the last SYN, as the tcp fallback comes 3.3 to 3.6 s after the first; or the first byte, as an
 // engine that freed the aborted session aborted there 63 times in 80 from 3 to 5 s, and 47 in 120 before 3 s
 const CONNECTING = [0, 800, 1600, 2400]
-const DELAYS = { one: CONNECTING, four: CONNECTING, pex: CONNECTING, remove: CONNECTING, limited: [3000, 3500, 4000, 4500] }
+const DELAYS = { one: CONNECTING, four: CONNECTING, pex: CONNECTING, remove: CONNECTING, limited: [3000, 3500, 4000, 4500], 'in-write': [0, 500] }
 
 const run = (variant, ms) => new Promise((resolve) => {
   const child = spawn(process.execPath, [SCRIPT, variant, String(ms)], { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -38,7 +38,7 @@ const run = (variant, ms) => new Promise((resolve) => {
 })
 
 for (const [variant, delays] of Object.entries(DELAYS)) {
-  test(`a session destroyed with a uTP peer (${variant}) ends cleanly and leaves nothing, and the next one works`, async () => {
+  test(`a session destroyed (${variant}) ends cleanly and leaves nothing, and the next one works`, async () => {
     for (const r of await Promise.all(delays.map((ms) => run(variant, ms)))) {
       const at = `${variant}, ${r.ms} ms after the mark`
       assert.ok(r.result, `${at}: no result (exit ${r.code}, ${r.killed ?? 'not killed'}): ${r.stderr}`)
@@ -48,7 +48,7 @@ for (const [variant, delays] of Object.entries(DELAYS)) {
         assert.equal(first.seed.outcome, 'clean', `${at}: the seed's destroy() ${first.seed.outcome}`)
         assert.deepEqual(first.seed.storages.released, first.seed.storages.made, `${at}: the seed's storages released`)
         assert.deepEqual(first.seed.storages.removed, first.seed.storages.made, `${at}: the seed's storages removed`)
-      } else {
+      } else if (variant !== 'in-write') {
         assert.equal(first.connects, 0, `${at}: the tcp fallback had started, so no uTP connect was in progress`)
       }
       assert.equal(first.outcome, 'clean', `${at}: destroy() ${first.outcome}`)
