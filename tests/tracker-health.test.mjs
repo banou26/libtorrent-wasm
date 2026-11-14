@@ -1,10 +1,5 @@
-// A tracker row has to tell a dead tracker from a live one on every kind of torrent.
-//
-// libtorrent keeps a tracker's state per protocol (v1 and v2) and never announces one the torrent
-// does not have, so that slot keeps zero failures forever. A row taking the best of both slots
-// read every tracker of a v1-only or v2-only torrent as working once it had been asked at all.
-//
-// Every tracker is on this machine, and the host lets nothing else out and looks no name up.
+// A tracker row reads failed when its tracker fails and working when it answers, on every kind of
+// torrent. Every tracker is on this machine, and the host lets nothing else out and looks no name up.
 
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
