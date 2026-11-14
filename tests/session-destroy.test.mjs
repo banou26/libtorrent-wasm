@@ -48,7 +48,9 @@ for (const [variant, delays] of Object.entries(DELAYS)) {
         assert.equal(first.seed.outcome, 'clean', `${at}: the seed's destroy() ${first.seed.outcome}`)
         assert.deepEqual(first.seed.storages.released, first.seed.storages.made, `${at}: the seed's storages released`)
         assert.deepEqual(first.seed.storages.removed, first.seed.storages.made, `${at}: the seed's storages removed`)
-      } else if (variant !== 'in-write') {
+      } else if (variant === 'in-write') {
+        assert.equal(first.save, 'refused', `${at}: a save asked after destroy(), before the end it deferred`)
+      } else {
         assert.equal(first.connects, 0, `${at}: the tcp fallback had started, so no uTP connect was in progress`)
       }
       assert.equal(first.outcome, 'clean', `${at}: destroy() ${first.outcome}`)

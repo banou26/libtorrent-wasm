@@ -8,7 +8,8 @@
 //   remove   one peer, and the torrent removed in the same turn as the destroy
 //   limited  a download under a ceiling from a seed engine over uTP; the mark is the first byte
 //   in-write a download from a loopback peer over tcp, destroyed from inside the storage's first write after the mark,
-//            which the engine makes from inside its own tick; the mark is the torrent started
+//            which the engine makes from inside its own tick, and a resume save asked there; the mark is the torrent
+//            started
 //
 // The named peers are in TEST-NET-3, whose datagrams the host drops, so each connect stays in progress until uTP
 // gives up and the engine tries TCP instead, about 4 s after its first SYN.
@@ -185,12 +186,14 @@ if (variant === 'limited') {
 await waitFor('a SYN to each named peer', () => named.every((address) => hostA.datagrams.some((d) => d.address === address)), 10_000)
 await sleep(ms)
 a.stop()
+let saving = null
 const ask = {
   remove: () => { a.session.removeTorrent(handle); a.session.destroy() },
   'in-write': () => new Promise((resolve, reject) => {
     a.storage.onWrite = () => {
       a.storage.onWrite = () => {}
       try { a.session.destroy() } catch (error) { reject(error); return }
+      saving = a.session.saveResumeData(handle, 3000).then(() => 'saved', () => 'refused')
       // queued behind the end destroy() deferred, so the storages are read once it has run and before any other task
       queueMicrotask(resolve)
     }
@@ -198,6 +201,7 @@ const ask = {
   }),
 }[variant]
 const first = { connects: hostA.connects.length, transport, ...await destroyed(a, ask) }
+if (saving) first.save = await Promise.race([saving, sleep(500).then(() => 'waiting')])
 if (seed) {
   seed.stop()
   first.seed = await destroyed(seed)
