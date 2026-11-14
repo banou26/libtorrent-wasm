@@ -179,6 +179,19 @@ test('a save sent with the add is answered', async (t) => {
   assert.equal(Buffer.from(resume['info-hash']).toString('hex'), fx.meta.infoHash)
 })
 
+test('a save for a torrent the session does not hold is refused at once', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const { session } = await engineHolding(defer, fx)
+
+  const removed = session.addMagnet(magnetFor(HASH_A, 'a'), '/dl')
+  session.removeTorrent(removed)
+  for (const handle of [NEVER_GIVEN, removed]) {
+    const answer = await Promise.race([session.saveResumeData(handle, 3000).then(() => 'saved', () => 'refused'), sleep(500).then(() => 'waiting')])
+    assert.equal(answer, 'refused', `handle ${handle}`)
+  }
+})
+
 test('every command takes a handle from its add, and answers -1, as a remove does, for one never given out', async (t) => {
   const defer = teardown(t)
   const fx = fixture(defer, MiB)

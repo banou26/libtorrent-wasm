@@ -712,8 +712,15 @@ export class Session {
    */
   forceRecheck(handle: number) { this.mod._lt_torrent_force_recheck(handle) }
 
+  /**
+   * The torrent's resume data, for {@link addTorrentWithResume}. Answered from the add that returned
+   * the handle on, and only while something pumps alerts. Rejected at once for a handle this session
+   * does not hold, and after `timeoutMs` when no answer came.
+   */
   saveResumeData(handle: number, timeoutMs = 8000): Promise<Uint8Array> {
-    this.mod._lt_torrent_save_resume_data(handle)
+    if (!this.handles.has(handle) || this.mod._lt_torrent_save_resume_data(handle) !== 0) {
+      return Promise.reject(new Error(`save_resume_data: no torrent ${handle}`))
+    }
     return new Promise<Uint8Array>((resolve, reject) => {
       const waiter: ResumeWaiter = {
         handle,
