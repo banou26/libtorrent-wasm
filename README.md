@@ -223,10 +223,12 @@ engine resolves names over HTTPS at 1.1.1.1, from the page's own network.
 `session.destroy()` ends the session within the call, in milliseconds.
 libtorrent's abort runs: every peer is disconnected, and each torrent's storage
 is stopped and released (`stop`, `release`), then removed (`onRemoveStorage`),
-once each. The shim then closes every socket the session opened on its host,
-and its tick, so nothing is left to keep a worker or a node process alive. A
-`read()` or a `saveResumeData()` still waiting is rejected. A session made after
-it with `createSession`, in the same worker, works as the first one did.
+once each. The shim then closes every socket the session opened on its host, and
+its tick, so nothing keeps a worker or a node process alive but a socket reopen
+or a redial already waiting after a relay outage, which runs out within 2 s and
+does nothing. A `read()` or a `saveResumeData()` still waiting is rejected. A
+session made after it with `createSession`, in the same worker, works as the
+first one did.
 
 What libtorrent would go on to wait for is dropped: a uTP socket's resends, a
 peer's bandwidth quota, and the `stopped` announce to each HTTP tracker the
