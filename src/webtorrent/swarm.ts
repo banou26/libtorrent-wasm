@@ -457,7 +457,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
    * reply is the one to `stopped`, which counts the swarm without us.
    */
   const offerRound = async (t: Torrent, announcing: Announcing) => {
-    if (seeding(t.view)) return
+    if (seeding(t.view) || !announcing.tracker.connected) return
     const others = (announcing.seeders ?? 0) + (announcing.leechers ?? 0) - 1
     const count = Math.min(OFFERS_PER_ANNOUNCE, room(t), others - t.conns.size)
     if (count < 1) return
