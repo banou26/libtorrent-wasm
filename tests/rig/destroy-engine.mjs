@@ -54,11 +54,14 @@ const trackedHost = (options) => {
   }
 }
 
-/** NodeFSStorage, keeping the ids of every storage made and removed. */
+/** NodeFSStorage, keeping the ids of every storage made, stopped or released, and removed. */
 class CountingStorage extends NodeFSStorage {
   made = []
+  released = []
   removed = []
   onNewStorage(id, ...rest) { this.made.push(id); return super.onNewStorage(id, ...rest) }
+  stop(id) { this.released.push(id); return super.stop(id) }
+  release(id) { this.released.push(id); return super.release(id) }
   onRemoveStorage(id) { this.removed.push(id); return super.onRemoveStorage(id) }
 }
 
@@ -86,9 +89,13 @@ const start = async (dir, host, options = {}) => {
   return { session, storage, watch, running, stop: () => clearInterval(pump) }
 }
 
-/** Destroys the engine; `storages` holds the ids of the storages it made and of those the destroy removed, sorted. */
+/**
+ * Destroys the engine. `storages` holds the ids of the storages it made, of those the destroy stopped or released, and
+ * of those it removed, sorted.
+ */
 const destroyed = ({ session, storage }, before = () => {}) => {
   const t0 = performance.now()
+  const releasedBefore = storage.released.length
   const removedBefore = storage.removed.length
   let outcome = 'clean'
   try {
@@ -100,7 +107,11 @@ const destroyed = ({ session, storage }, before = () => {}) => {
   return {
     outcome,
     ms: Math.round(performance.now() - t0),
-    storages: { made: [...storage.made].sort(), removed: storage.removed.slice(removedBefore).sort() },
+    storages: {
+      made: [...storage.made].sort(),
+      released: [...new Set(storage.released.slice(releasedBefore))].sort(),
+      removed: storage.removed.slice(removedBefore).sort(),
+    },
   }
 }
 

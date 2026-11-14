@@ -1,6 +1,7 @@
-// destroy() is clean, removes each storage once, leaves no socket or handle, and a second session works, with a uTP
-// peer still in its connect (one, four, pex, remove) or connected under a download ceiling (limited), each run a
-// process of its own (tests/rig/destroy-engine.mjs) that has to end by itself; and a resume save it cuts short settles.
+// destroy() is clean, releases and removes each storage, leaves no socket or handle, and a second session works,
+// with a uTP peer still in its connect (one, four, pex, remove) or connected under a download ceiling (limited), each
+// run a process of its own (tests/rig/destroy-engine.mjs) that has to end by itself; and a resume save it cuts short
+// settles.
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
@@ -45,17 +46,19 @@ for (const [variant, delays] of Object.entries(DELAYS)) {
       if (variant === 'limited') {
         assert.deepEqual(first.transport, ['utp'], `${at}: the leech's peers`)
         assert.equal(first.seed.outcome, 'clean', `${at}: the seed's destroy() ${first.seed.outcome}`)
+        assert.deepEqual(first.seed.storages.released, first.seed.storages.made, `${at}: the seed's storages released`)
         assert.deepEqual(first.seed.storages.removed, first.seed.storages.made, `${at}: the seed's storages removed`)
       } else {
         assert.equal(first.connects, 0, `${at}: the tcp fallback had started, so no uTP connect was in progress`)
       }
       assert.equal(first.outcome, 'clean', `${at}: destroy() ${first.outcome}`)
+      assert.deepEqual(first.storages.released, first.storages.made, `${at}: storages released by destroy()`)
       assert.deepEqual(first.storages.removed, first.storages.made, `${at}: storages removed by destroy()`)
       assert.deepEqual(first.open, [], `${at}: host sockets left open`)
       assert.deepEqual(first.resources, [], `${at}: what still holds the process after destroy()`)
       assert.ok(second.sameBytes, `${at}: the second session saved other bytes`)
       assert.equal(second.outcome, 'clean', `${at}: the second destroy() ${second.outcome}`)
-      assert.deepEqual(second.storages, { made: [0], removed: [0] }, `${at}: the second session's storages`)
+      assert.deepEqual(second.storages, { made: [0], released: [0], removed: [0] }, `${at}: the second session's storages`)
       assert.deepEqual(second.open, [], `${at}: host sockets the second session left open`)
       assert.equal(r.killed, null, `${at}: ${r.killed}`)
       assert.equal(r.code, 0, `${at}: exit ${r.code}: ${r.stderr}`)
