@@ -567,7 +567,7 @@ const DEFAULT_WINDOW_PIECES = 12
 const DEFAULT_DEADLINE_STEP_MS = 1000
 
 type PieceWaiter = { handle: number, p0: number, p1: number, settle: (err?: Error) => void }
-type ResumeWaiter = { handle: number, resolve: (data: Uint8Array) => void }
+type ResumeWaiter = { handle: number, resolve: (data: Uint8Array) => void, reject: (err: Error) => void, timer: ReturnType<typeof setTimeout> }
 type ListWaiter<T> = { handle: number, resolve: (list: T[]) => void, timer: ReturnType<typeof setTimeout> }
 
 export class Session {
@@ -714,12 +714,16 @@ export class Session {
   saveResumeData(handle: number, timeoutMs = 8000): Promise<Uint8Array> {
     this.mod._lt_torrent_save_resume_data(handle)
     return new Promise<Uint8Array>((resolve, reject) => {
-      const waiter: ResumeWaiter = { handle, resolve }
+      const waiter: ResumeWaiter = {
+        handle,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          const i = this.resumeWaiters.indexOf(waiter)
+          if (i >= 0) { this.resumeWaiters.splice(i, 1); reject(new Error('save_resume_data timed out')) }
+        }, timeoutMs),
+      }
       this.resumeWaiters.push(waiter)
-      setTimeout(() => {
-        const i = this.resumeWaiters.indexOf(waiter)
-        if (i >= 0) { this.resumeWaiters.splice(i, 1); reject(new Error('save_resume_data timed out')) }
-      }, timeoutMs)
     })
   }
 
@@ -1598,7 +1602,7 @@ export class Session {
     this.resumeByHandle.set(handle, data)
     this.resumeWaiters = this.resumeWaiters.filter(w => {
       if (w.handle !== handle) return true
-      w.resolve(data); return false
+      clearTimeout(w.timer); w.resolve(data); return false
     })
   }
 
@@ -1725,6 +1729,7 @@ export class Session {
     // that were never written, and it returns them as though they were real
     this.failPieceWaiters(new Error('read: session destroyed'))
     this.pieceWaiters = []
+    for (const w of this.resumeWaiters) { clearTimeout(w.timer); w.reject(new Error('save_resume_data: session destroyed')) }
     this.resumeWaiters = []
     this.deadlineRefs.clear()
     this.priosByHandle.clear()
