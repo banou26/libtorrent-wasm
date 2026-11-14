@@ -220,29 +220,33 @@ engine resolves names over HTTPS at 1.1.1.1, from the page's own network.
 
 ## Ending a session
 
-`session.destroy()` ends the session within the call, in milliseconds:
-libtorrent's abort runs (every peer is disconnected, a uTP connect in progress
-included, and each torrent's storage is released), and the shim then closes
-every socket the session opened on its host, and its tick. Nothing is left to
-keep a worker or a node process alive, and a session made after it with
-`createSession`, in the same worker, works as the first one did. Pending
-`read()` calls are rejected.
+`session.destroy()` ends the session within the call, in milliseconds.
+libtorrent's abort runs: every peer is disconnected, and each torrent's storage
+is stopped and released (`stop`, `release`), then removed (`onRemoveStorage`),
+once each. The shim then closes every socket the session opened on its host,
+and its tick, so nothing is left to keep a worker or a node process alive. A
+`read()` or a `saveResumeData()` still waiting is rejected. A session made after
+it with `createSession`, in the same worker, works as the first one did.
 
-What libtorrent would go on to wait for is dropped instead: the uTP sockets'
-resends, and the `stopped` announce to each HTTP tracker the torrent announced
-to, whose connection is dialled and closed before a byte is sent.
+What libtorrent would go on to wait for is dropped: a uTP socket's resends, a
+peer's bandwidth quota, and the `stopped` announce to each HTTP tracker the
+torrent announced to, whose connection is dialled and closed before a byte is
+sent. The aborted session is never freed, because libtorrent's destructors, run
+before those have ended, free a uTP socket after its packet pool and a peer
+after its socket. It stays in the module instance, which `createSession` makes
+for each session, and goes when the `Session` does.
 
-Before patch 0016 and the order `lt_session_destroy` now takes, a session
-destroyed while a uTP connect was in progress aborted inside the wasm
-(`Aborted(native code called abort())`) and never reached the shim's teardown,
-so its sockets and its tick stayed open and the process never ended. With one
-process per destroy, every 50 ms from 0 to 5 s after the add, on 0.3.24: 73 of
-101 aborted with a magnet naming one peer, 79 with four, 76 with a stream peer
-naming four in peer exchange, and 77 with a remove asked in the same turn,
-nearly every run between the first SYN and the TCP fallback; 0 of 101 in each
-since. A connected uTP peer did the same damage without aborting, which only
-libtorrent's own assertions showed (`!m_attached` in `~utp_socket_impl`).
-`tests/session-destroy.test.mjs` pins it.
+Freed as 0.3.24 frees it, a session destroyed with a uTP peer aborted inside the
+wasm (`Aborted(native code called abort())`), skipped the shim's teardown and
+left the process running. With one process per destroy, every 100 ms from 0 to
+6 s, on 0.3.24: 41 of 61 aborted with a uTP connect to one peer in progress, 39
+with connects to four, 5 with a connect refused by a reset, 1 with a connected
+uTP peer, and 31 with a connected uTP peer under a 300 KB/s download ceiling.
+Now 0 of 61 abort in each of 20 cases: those five, and a seed destroyed before
+its leech, a relay outage with and without the relay back, a TCP connect and a
+TCP transfer, resume saves, storage writes in flight, an HTTP announce, name
+lookups answered late or never, the DHT, a stream peer, a file check, and a
+session never ticked. `tests/session-destroy.test.mjs` pins it.
 
 ## When the relay goes away
 
