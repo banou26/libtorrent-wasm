@@ -437,8 +437,8 @@ export interface TrackerInfo {
   /** Trackers in tier 0 are tried first; a later tier is only used if the ones before it fail. */
   tier: number
   /**
-   * Consecutive failures, or -1 when this tracker has never been contacted at all. The distinction
-   * matters: zero failures on a tracker that has never been tried is not the same as a working one.
+   * Consecutive failures, or -1 until this tracker has answered or failed. The distinction matters:
+   * zero failures on a tracker that has never answered is not the same as a working one.
    */
   fails: number
   /** An announce is in flight right now. */

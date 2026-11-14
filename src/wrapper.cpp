@@ -528,7 +528,10 @@ void emit_trackers(lt::tracker_list_alert const* a) {
         if (!hashes.has(v)) continue;
         auto const& ih = ep.info_hashes[v];
         if (ih.updating) updating = true;
-        if (best_fails < 0 || ih.fails < best_fails) {
+        // A slot nobody asked has zero failures too, and a forced reannounce gives every tracker its
+        // slots. `verified` is set by an answer only and never cleared, so it tells the two apart.
+        bool const counts = ih.fails > 0 || t.verified;
+        if (counts && (best_fails < 0 || ih.fails < best_fails)) {
           best_fails = ih.fails;
           message = ih.message.empty() && ih.last_error ? ih.last_error.message() : ih.message;
         }
@@ -545,7 +548,7 @@ void emit_trackers(lt::tracker_list_alert const* a) {
     str(t.url);
     str(message);
     i32(t.tier);
-    // -1 when the tracker has never been contacted at all, which is not the same as zero failures
+    // -1 until the tracker has answered or failed, which is not the same as zero failures
     i32(best_fails);
     u32(updating ? 1u : 0u);
     u32(verified ? 1u : 0u);
