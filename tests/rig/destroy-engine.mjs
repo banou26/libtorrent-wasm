@@ -191,8 +191,8 @@ const ask = {
     a.storage.onWrite = () => {
       a.storage.onWrite = () => {}
       try { a.session.destroy() } catch (error) { reject(error); return }
-      // the storages are read once the tick that made this write has returned
-      setTimeout(resolve)
+      // queued behind the end destroy() deferred, so the storages are read once it has run and before any other task
+      queueMicrotask(resolve)
     }
     dialTcp(a.session, handle, '127.0.0.1', source.port)
   }),

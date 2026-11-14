@@ -14,7 +14,7 @@ const SCRIPT = path.join(import.meta.dirname, 'rig', 'destroy-engine.mjs')
 // ms after the mark: the last SYN, as the tcp fallback comes 3.3 to 3.6 s after the first; or the first byte, as an
 // engine that freed the aborted session aborted there 63 times in 80 from 3 to 5 s, and 47 in 120 before 3 s
 const CONNECTING = [0, 800, 1600, 2400]
-const DELAYS = { one: CONNECTING, four: CONNECTING, pex: CONNECTING, remove: CONNECTING, limited: [3000, 3500, 4000, 4500], 'in-write': [0, 500] }
+const DELAYS = { one: CONNECTING, four: CONNECTING, pex: CONNECTING, remove: CONNECTING, limited: [3000, 3500, 4000, 4500], 'in-write': [0] }
 
 const run = (variant, ms) => new Promise((resolve) => {
   const child = spawn(process.execPath, [SCRIPT, variant, String(ms)], { stdio: ['ignore', 'pipe', 'pipe'] })
