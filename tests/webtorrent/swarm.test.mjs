@@ -704,6 +704,21 @@ test('a remote that closed its channel without a byte brings no early offer: it 
   assert.deepEqual(madeAndOffered(r), before)
 })
 
+test('no early offer is made while the tracker’s socket is down, and its return offers', async t => {
+  const r = await lonely(t)
+  await lose(r)
+  r.tracker.refusing = true
+  r.tracker.drop()
+  await settle()
+  const [made, offered] = madeAndOffered(r)
+  await advance(t, 66 * SECOND, SECOND)
+  assert.deepEqual(madeAndOffered(r), [made, offered])
+  r.tracker.refusing = false
+  // its third try to reconnect comes 70 to 87.5 s after the drop
+  await advance(t, 25 * SECOND, SECOND)
+  assert.deepEqual(madeAndOffered(r), [made + 1, offered + 1])
+})
+
 test('an attempt that never opened brings no early offer', async t => {
   const r = await lonely(t)
   await new Remote(r, undefined, fakeRtc({ mute: true })).offer(1)
