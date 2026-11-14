@@ -15,7 +15,7 @@ import { bdecode, bencode, magnetFor, makeTorrent } from '../rig/make-torrent.mj
 import { waitFor } from '../rig/peer-handshake.mjs'
 import { ScriptedPeer } from '../rig/scripted-peer.mjs'
 import { MiB, fixture, savedSha256, startEngine, teardown, tempDir } from '../rig/stream-engine.mjs'
-import { TRACKER, download, finished, routedWebSocket, seed, swarmOver } from './engine-swarm.mjs'
+import { TRACKER, download, finished, magnetOf, routedWebSocket, seed, swarmOver } from './engine-swarm.mjs'
 import { FakeSession, fakeRtc, nativeRtc, referenceTracker, releaseNativeRtc } from './fakes.mjs'
 
 after(releaseNativeRtc)
@@ -109,6 +109,53 @@ const cutOff = async (t, RTCPeerConnection) => {
   assert.deepEqual(await b.session.peers(handle), [])
 }
 
+/**
+ * `b` downloads what `a` seeds, is paused once its channel is open and its metadata in (as ripple parks a
+ * download page's torrent), and is resumed. With `cut`, `a` takes no stream, so each end sees the other silent.
+ * Null without the reference tracker.
+ */
+const pausedAndResumed = async (t, RTCPeerConnection, { cut = false } = {}) => {
+  const defer = teardown(t)
+  const reference = await referenceTracker(t)
+  if (!reference) return null
+  Routed = routedWebSocket(reference.url)
+  const there = fixture(defer, 4 * MiB)
+  const a = await side(defer, path.join(there.root, 'a'), RTCPeerConnection, cut ? { cut } : undefined)
+  const b = await side(defer, path.join(there.root, 'b'), RTCPeerConnection, {})
+  await seed(a, there, 'there')
+  // far from done when it is paused
+  b.session.setRateLimits({ download: 64 * 1024 })
+  const handle = await b.running(b.session.addMagnet(magnetOf(there), '/there'))
+  if (cut) await waitFor('the seed to be silent', () => b.of(handle)?.silent === 1)
+  else await waitFor('a channel and the metadata', () => b.of(handle)?.open === 1 && b.session.status(handle)?.hasMetadata)
+  b.session.pauseTorrent(handle)
+  await waitFor('the swarm to stop it', () => !b.of(handle))
+  b.session.resumeTorrent(handle)
+  await waitFor('the swarm to run it again', () => b.of(handle))
+  return { a, b, there, handle }
+}
+
+// The seed left the id whose channel closed alone for 60 s, and the next offer waited for the tracker's interval,
+// 120 s at the reference tracker.
+const backAtOnce = async (t, RTCPeerConnection) => {
+  const run = await pausedAndResumed(t, RTCPeerConnection)
+  if (!run) return t.skip('bittorrent-tracker is not installed')
+  const { b, there, handle } = run
+  await waitFor('a channel again', () => b.of(handle)?.open === 1, 10_000)
+  b.session.setRateLimits({ download: 0 })
+  await finished(b, handle, 20_000)
+  assert.equal(savedSha256(b, handle), there.sha256)
+}
+
+const silentStays = async (t, RTCPeerConnection) => {
+  const run = await pausedAndResumed(t, RTCPeerConnection, { cut: true })
+  if (!run) return t.skip('bittorrent-tracker is not installed')
+  const { b, handle } = run
+  // several times what a channel takes to open again after a resume
+  await new Promise((resolve) => setTimeout(resolve, 8000))
+  assert.deepEqual([b.handed.length, b.of(handle)?.silent], [1, 1])
+}
+
 test('the counted host counts: a magnet that names a tracker and a peer has the engine ask for a name, a datagram and a connect', async (t) => {
   const defer = teardown(t)
   const host = countedHost()
@@ -127,6 +174,14 @@ test('two engines that can reach nothing but each other\'s streams find each oth
 
 test('with a session that takes no stream the same download never starts: the streams are the only way', async (t) => {
   await cutOff(t, fakeRtc())
+})
+
+test('a download paused once its channel is open and resumed has its seed back at once, and finishes', async (t) => {
+  await backAtOnce(t, fakeRtc())
+})
+
+test('a seed that never spoke is still left alone after the download that saw it is paused and resumed', async (t) => {
+  await silentStays(t, fakeRtc())
 })
 
 test('a magnet that names no tracker finds its seed through a tracker the caller passed, and downloads', async (t) => {
@@ -307,4 +362,8 @@ test('libdatachannel: the same two engines over real ICE, DTLS and SCTP on this 
 
 test('libdatachannel: with a session that takes no stream the download never starts', { skip: !nativeRtc && 'node-datachannel did not load' }, async (t) => {
   await cutOff(t, nativeRtc.RTCPeerConnection)
+})
+
+test('libdatachannel: a download paused and resumed has its seed back at once', { skip: !nativeRtc && 'node-datachannel did not load' }, async (t) => {
+  await backAtOnce(t, nativeRtc.RTCPeerConnection)
 })

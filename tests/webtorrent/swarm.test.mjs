@@ -248,7 +248,7 @@ test('before the metadata is known left is 16 KiB, and the torrent offers like a
   assert.equal(r.offered(1)[0].left, 16 * 1024)
 })
 
-test('each torrent has its own tracker id, of the reference shape, and keeps it across a pause', async t => {
+test('each torrent has its own tracker id, of the reference shape, says stopped under it, and runs again under a new one', async t => {
   const r = rig(t)
   await r.start(1)
   await r.start(2)
@@ -259,8 +259,11 @@ test('each torrent has its own tracker id, of the reference shape, and keeps it 
   await settle()
   r.session.resume(1)
   await settle()
-  assert.deepEqual([...new Set(idOf(1))], [idOf(1)[0]])
-  assert.deepEqual(idOf(1).length, 3)
+  assert.deepEqual(r.tracker.announces(hashOf(1)).map(message => message.event), ['started', 'stopped', 'started'])
+  const [first, stopped, again] = idOf(1)
+  assert.equal(stopped, first)
+  assert.match(again, /^-RP0001-[A-Za-z0-9]{12}$/)
+  assert.notEqual(again, first)
 
   r.session.remove(1)
   await settle()
@@ -805,6 +808,26 @@ test('through the page half a silent remote is told the same way, whichever end 
   speaking.remote.sockets[0].destroy()
   await until('its channel closed', () => r.live() === 0)
   assert.equal(silent(), 2, 'a remote that sent a byte is not')
+})
+
+test('a torrent that runs again after a pause answers at once the remotes whose channels the pause closed', async t => {
+  const r = rig(t)
+  await r.start(1)
+  const remotes = [new Remote(r), new Remote(r)]
+  for (const remote of remotes) {
+    assert.equal(await remote.connect(1), true)
+    remote.sockets[0].write(Buffer.of(19))
+  }
+  await settle()
+  // libtorrent closes the peers of a torrent it pauses, and the swarm closes what is left once it reads the pause
+  r.session.streams[0].socket.destroy()
+  r.session.pause(1)
+  await settle()
+  await advance(t, CLOSING)
+  assert.deepEqual(remotes.map(remote => remote.closes), [1, 1])
+  r.session.resume(1)
+  await settle()
+  for (const remote of remotes) assert.equal(await remote.connect(1), true)
 })
 
 test('a silent remote is still left alone after its torrent was paused and resumed', async t => {

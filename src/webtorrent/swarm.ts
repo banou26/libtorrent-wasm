@@ -206,14 +206,14 @@ type Quiet = {
 
 /** What is kept of a torrent for as long as the session has it, across a pause. */
 type Memory = {
-  /** The torrent's tracker id: one for the whole session. */
-  peerId: string
   quiet: Map<string, Quiet>
   /** Where its ordinary peers are or were, with `relay`. */
   ordinary: Set<string>
 }
 
 type Torrent = Memory & {
+  /** The torrent's tracker id, a new one each time it runs. */
+  peerId: string
   handle: number
   hash: string
   view: View
@@ -622,11 +622,15 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       return
     }
     if (!t) {
-      const memory = memories.get(handle) ?? { peerId: peerId(), quiet: new Map(), ordinary: new Set() }
+      const memory = memories.get(handle) ?? { quiet: new Map(), ordinary: new Set() }
       memories.set(handle, memory)
+      // A stop closes every channel, and each remote then leaves the id it saw close alone for a minute, as this
+      // end does the remotes: a torrent that runs again does so under a new id, and leaves alone only the remotes
+      // that stayed silent.
+      for (const [remote, { silent }] of memory.quiet) if (!silent) memory.quiet.delete(remote)
       t = {
-        ...memory, handle, view, hash: binaryHash(view.infoHash), announcing: new Map(), conns: new Set(),
-        offers: new Map(), leeching: false, completed: false, lastPeerAt: null, lookAt: 0,
+        ...memory, peerId: peerId(), handle, view, hash: binaryHash(view.infoHash), announcing: new Map(),
+        conns: new Set(), offers: new Map(), leeching: false, completed: false, lastPeerAt: null, lookAt: 0,
       }
       torrents.set(handle, t)
       byHash.set(t.hash, t)

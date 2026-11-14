@@ -572,6 +572,9 @@ once more, and each remote keeps its end of the old connection until its own sta
   no new connection and keeps what it has, except what a magnet whose metadata says private had at the passed
   trackers ([the direct mode](#the-direct-mode)): the engine checks for a moment when a magnet's metadata
   arrives, with its peers kept, and closes them itself for a recheck.
+- **A torrent that runs again has its peers back at once.** It runs under a new tracker id, since each remote
+  leaves the id whose channel closed alone for 60 s, and leaves alone only the remotes that stayed silent, so a
+  pause and a resume cost no wait for the tracker's next interval.
 - **An empty swarm costs no connection.** The first announce carries no offer; offers follow the count in the
   tracker's reply, and a seeding torrent makes none and only answers.
 - **The first seconds wait for nothing.** The offers go out as soon as the first reply names somebody and their
@@ -635,7 +638,7 @@ once more, and each remote keeps its end of the old connection until its own sta
 | an answered attempt that has not opened | closed after 30 s |
 | an open channel nothing reads | closed after 10 s |
 | an attempt whose description never comes | given up after 10 s |
-| a remote whose channel closed | not answered for 60 s |
+| a remote whose channel closed | not answered for 60 s, or until the torrent runs again after a stop |
 | a remote whose channel opened and ended before it had sent a byte | not answered, and its answers not taken, for 10 min |
 | remotes a torrent leaves alone at one time | 200, then the oldest is forgotten |
 | with `relay`, a channel whose remote address is or was an ordinary peer of the torrent in this session | closed |
