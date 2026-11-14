@@ -218,6 +218,32 @@ port that cannot exist.
 `dnsLookup` is an option of `createSession` on its own too. Without one the
 engine resolves names over HTTPS at 1.1.1.1, from the page's own network.
 
+## Ending a session
+
+`session.destroy()` ends the session within the call, in milliseconds:
+libtorrent's abort runs (every peer is disconnected, a uTP connect in progress
+included, and each torrent's storage is released), and the shim then closes
+every socket the session opened on its host, and its tick. Nothing is left to
+keep a worker or a node process alive, and a session made after it with
+`createSession`, in the same worker, works as the first one did. Pending
+`read()` calls are rejected.
+
+What libtorrent would go on to wait for is dropped instead: the uTP sockets'
+resends, and the `stopped` announce to each HTTP tracker the torrent announced
+to, whose connection is dialled and closed before a byte is sent.
+
+Before patch 0016 and the order `lt_session_destroy` now takes, a session
+destroyed while a uTP connect was in progress aborted inside the wasm
+(`Aborted(native code called abort())`) and never reached the shim's teardown,
+so its sockets and its tick stayed open and the process never ended. With one
+process per destroy, every 50 ms from 0 to 5 s after the add, on 0.3.24: 73 of
+101 aborted with a magnet naming one peer, 79 with four, 76 with a stream peer
+naming four in peer exchange, and 77 with a remove asked in the same turn,
+nearly every run between the first SYN and the TCP fallback; 0 of 101 in each
+since. A connected uTP peer did the same damage without aborting, which only
+libtorrent's own assertions showed (`!m_attached` in `~utp_socket_impl`).
+`tests/session-destroy.test.mjs` pins it.
+
 ## When the relay goes away
 
 A relay that restarts, or a connection to it that drops, ends the engine's UDP
@@ -1174,3 +1200,5 @@ rerun `make apply-patches`; rejected hunks must be reconciled manually.
 | 0013 | A peer the engine dialled on an `addPeerStream` address is read as having no `ut_holepunch`, so no holepunch message goes to it and none from it is acted on. Asked for a rendezvous, a libtorrent 2.1 remote tells the peer we could not reach our address, and that peer then leaves our stream to it silent. Asked by one, the engine would tell an ordinary peer to connect to the made-up address. A peer that dialled in from `100.64.0.0/10` is an ordinary one and keeps its holepunch. |
 | 0014 | A uTP socket names the last sequence number it received, which the reset sent when the relay comes back has to acknowledge for a libtorrent remote to take it. |
 | 0015 | A uTP reset is numbered at the first packet its remote has not acknowledged, where upstream numbers it at random. A libtorrent remote drops a packet numbered past its reorder window before it reads the type, which is half of all numbers. |
+| 0016 | A session's abort fails the uTP sockets on each UDP socket it closes at once, as closing a TCP socket fails its pending operations. Upstream waits for their resends to give up, which `session.destroy()` cannot: a socket still attached was freed after its packet pool, and the engine aborted. |
+| 0017 | A name answered after the session is gone reaches no resolver: the resolver clears the pointer the answer finds it by when it is destroyed. |
