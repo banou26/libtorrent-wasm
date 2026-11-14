@@ -224,6 +224,33 @@ test('a download held in upload mode, which drops its seed at the metadata, has 
   await heldAndLetGo(t, fakeRtc())
 })
 
+// Each end leaves the other's id alone for 60 s after a channel closes. At a 60 s interval the download's next
+// announce came inside that minute and its offer went unanswered: a channel again 117 s after the close, against 65 s.
+test('a download whose seed closes the channel mid-download has a channel again within 90 s, and finishes', { timeout: 150_000 }, async (t) => {
+  const defer = teardown(t)
+  const reference = await referenceTracker(t)
+  if (!reference) return t.skip('bittorrent-tracker is not installed')
+  // what ripple's tracker asks: the reference tracker tells a WebSocket peer a fifth of this
+  reference.server.intervalMs = 300_000
+  Routed = routedWebSocket(reference.url)
+  const seedRtc = fakeRtc()
+  const there = fixture(defer, 4 * MiB)
+  const a = await side(defer, path.join(there.root, 'a'), seedRtc)
+  const b = await side(defer, path.join(there.root, 'b'), fakeRtc())
+  await seed(a, there, 'there')
+  b.session.setRateLimits({ download: 64 * 1024 })
+  const handle = await b.running(b.session.addMagnet(magnetOf(there), '/there'))
+  await waitFor('a channel, and bytes over it', () => b.of(handle)?.open === 1 && b.session.status(handle)?.totalDone > 0)
+  const closedAt = Date.now()
+  for (const pc of seedRtc.all) if (pc.channel?.readyState === 'open') pc.channel.close()
+  await waitFor('the channel to close', () => b.of(handle)?.open === 0)
+  await waitFor('a channel again', () => b.of(handle)?.open === 1, 90_000)
+  t.diagnostic(`a channel again ${Date.now() - closedAt} ms after the close`)
+  b.session.setRateLimits({ download: 0 })
+  await finished(b, handle, 20_000)
+  assert.equal(savedSha256(b, handle), there.sha256)
+})
+
 test('a magnet that names no tracker finds its seed through a tracker the caller passed, and downloads', async (t) => {
   const defer = teardown(t)
   const reference = await referenceTracker(t)
