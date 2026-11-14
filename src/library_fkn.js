@@ -22,6 +22,8 @@ addToLibrary({
       NOTSOCK: 57,
       TIMEDOUT: 73,
     },
+    // A host socket's error by its code, as its errno is Node's (negative, Linux numbering) rather than one of these
+    nodeErr: { ECONNREFUSED: 14, EHOSTUNREACH: 23, ENETUNREACH: 40, ETIMEDOUT: 73 },
 
     // Asio's select_reactor on Emscripten uses select() with FD_SETSIZE=1024, so fds must stay strictly below that
     // start at 16 to leave libc room for stdio (0-2) and any sockfs entries Emscripten allocates before the shim takes over; closeFd's `fd >= 16 && fd < 1024` reuse guard is coupled to this value and to FD_SETSIZE
@@ -502,7 +504,7 @@ addToLibrary({
       sock.on('end', () => { st.recv.fin = true; FKN.scheduleTick() })
       sock.on('close', () => { st.recv.fin = true; FKN.scheduleTick() })
       sock.on('error', (err) => {
-        st.error = err.errno || FKN.err.CONNRESET
+        st.error = FKN.nodeErr[err?.code] || FKN.err.CONNRESET
         st.recv.error = st.error
         FKN.scheduleTick()
       })

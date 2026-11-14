@@ -1872,9 +1872,6 @@ async function reserve(
   return null
 }
 
-// WASI's ECONNREFUSED, the numbering the shim hands libtorrent (library_fkn.js, FKN.err)
-const ECONNREFUSED = 14
-
 /**
  * A host that carries nothing, for a session with no relay behind it, whose peers all come from
  * {@link Session.addPeerStream}.
@@ -1893,7 +1890,7 @@ export function offlineHost(): { net: any, dgram: any, dnsLookup: NonNullable<Fk
   const connect = () => {
     let refuse: ((err: Error) => void) | undefined
     // after the shim has attached its listeners, which it does once connect() has returned
-    queueMicrotask(() => refuse?.(Object.assign(new Error('offline host: connection refused'), { errno: ECONNREFUSED })))
+    queueMicrotask(() => refuse?.(Object.assign(new Error('offline host: connection refused'), { code: 'ECONNREFUSED' })))
     return {
       on(event: string, listener: (err: Error) => void) { if (event === 'error') refuse = listener },
       write: () => true,
