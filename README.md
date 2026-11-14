@@ -595,7 +595,8 @@ once more, and each remote keeps its end of the old connection until its own sta
   this address looks: it answers, the channel opens, and nothing comes. Chrome 156 and libdatachannel see it end
   the channel as it opens, 0 to 1 ms later in Chrome; the reference client's stack sees it stay open until
   libtorrent's handshake timeout ends the stream, 10.4 to 12.7 s later. Both count. A remote that sent one byte
-  never does, nor does a channel the swarm closed itself, nor a stream the engine let go without reading it.
+  never does, nor does a channel the swarm closed itself, nor a stream the engine let go without reading it or
+  ended in its first 5 s, as it does the streams of a torrent it pauses.
   `snapshot()` counts these remotes per torrent (`silent`), so an interface can tell peers that refuse this
   address from nobody being there.
 - **Its ids have the shape a libtorrent 2.1 peer reads.** The peer id and every offer id are exactly 20 bytes,

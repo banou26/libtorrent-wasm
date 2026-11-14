@@ -708,12 +708,14 @@ test('a remote that sent even one byte is never counted silent, nor one whose st
   spoke.sockets[0].write(Buffer.of(19))
   await settle()
   assert.equal(Buffer.concat(r.session.streams[0].bytes).length, 1)
+  await advance(t, 6 * SECOND, SECOND)
   await giveUp(r.session.streams[0])
 
   // The engine's own deadline ends a stream libtorrent never dialled: that says nothing about the remote.
   r.session.dials = false
   const undialled = new Remote(r)
   assert.equal(await undialled.connect(1), true)
+  await advance(t, 6 * SECOND, SECOND)
   await giveUp(r.session.streams[1])
 
   // Nor does the swarm closing a channel nothing dialled, 10 s after it opened.
@@ -799,6 +801,7 @@ test('through the page half a silent remote is told the same way, whichever end 
   await until('a remote that ended its channel without a byte is counted', () => silent() === 1)
 
   const refusing = await connected()
+  await advance(t, 11 * SECOND, SECOND)
   await giveUp(refusing.stream)
   await until('and one whose stream the engine gave up', () => silent() === 2)
 
@@ -871,6 +874,7 @@ test('a silent remote is still left alone after its torrent was paused and resum
   await r.start(1)
   const remote = new Remote(r)
   assert.equal(await remote.connect(1), true)
+  await advance(t, 11 * SECOND, SECOND)
   await giveUp(r.session.streams[0])
   r.session.pause(1)
   await settle()
@@ -881,16 +885,34 @@ test('a silent remote is still left alone after its torrent was paused and resum
   assert.equal(await remote.connect(1), false)
 })
 
+test('a remote whose stream the engine ended in its first 5 s, as a pause does, is not counted silent, and is answered at once when its torrent runs again', async t => {
+  const r = rig(t)
+  await r.start(1)
+  const remote = new Remote(r)
+  assert.equal(await remote.connect(1), true)
+  await advance(t, 4 * SECOND, SECOND)
+  r.session.streams[0].socket.destroy()
+  r.session.pause(1)
+  await settle()
+  assert.equal(remote.closes, 1)
+  r.session.resume(1)
+  await settle()
+  assert.equal(r.peers.snapshot().torrents[0].silent, 0)
+  assert.equal(await remote.connect(1), true)
+})
+
 test('a torrent leaves at most 200 remotes alone at a time, and forgets the oldest first', async t => {
   const BOUND = 200
   const r = rig(t, { limits: { perMinute: 1_000_000 } })
   await r.start(1)
+  const theirs = fakeRtc()
   const remotes = []
   // Counted, and it stops at the first count over the bound: with the bound gone this fails, it does not grow.
   for (let i = 0; i < BOUND + 10; i++) {
-    remotes.push(new Remote(r))
+    remotes.push(new Remote(r, undefined, theirs))
     assert.equal(await remotes[i].connect(1), true, `remote ${i} connected`)
-    await giveUp(r.session.streams[i])
+    remotes[i].sockets[0].destroy()
+    await settle()
     const held = r.peers.snapshot().torrents[0].silent
     assert.ok(held <= BOUND, `${held} remotes are remembered after ${i + 1} went silent: the bound is ${BOUND}`)
   }
@@ -906,6 +928,7 @@ test('with the relay flag the address a silent remote came from is left alone to
   const r = rig(t, { relay: true })
   await r.start(1)
   assert.equal(await from(r, '198.51.100.7').connect(1), true)
+  await advance(t, 11 * SECOND, SECOND)
   await giveUp(r.session.streams[0])
   const again = from(r, '198.51.100.7')
   await again.connect(1)
@@ -924,6 +947,7 @@ test('with the relay flag the address a silent remote came from is left alone to
   const plain = rig(t)
   await plain.start(1)
   assert.equal(await from(plain, '198.51.100.7').connect(1), true)
+  await advance(t, 11 * SECOND, SECOND)
   await giveUp(plain.session.streams[0])
   assert.equal(await from(plain, '198.51.100.7').connect(1), true)
   assert.equal(plain.session.streams.length, 2, 'without the flag no address is kept')

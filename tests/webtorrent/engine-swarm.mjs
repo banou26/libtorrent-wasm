@@ -30,10 +30,11 @@ export const routedWebSocket = (url) => {
 
 /**
  * What the swarm reads of a session, with every stream it hands over recorded in `handed`. `cut` refuses
- * each one. `checks` holds the state the engine passes through when a magnet's metadata arrives for half a
- * second, which is how a pump that read it at that moment leaves it until its next round.
+ * each one. `mute` drops what the engine writes to the first one, so its remote hears nothing from it. `checks`
+ * holds the state the engine passes through when a magnet's metadata arrives for half a second, which is how a
+ * pump that read it at that moment leaves it until its next round.
  */
-export const seenThrough = (session, handed, { cut = false, checks = false } = {}) => {
+export const seenThrough = (session, handed, { cut = false, mute = false, checks = false } = {}) => {
   const since = new Map()
   return {
     torrents: () => session.torrents(),
@@ -51,6 +52,7 @@ export const seenThrough = (session, handed, { cut = false, checks = false } = {
     addPeerStream: (handle, socket) => {
       handed.push(handle)
       if (cut) throw new Error('this session takes no stream')
+      if (mute && handed.length === 1) socket.write = () => true
       return session.addPeerStream(handle, socket)
     },
   }

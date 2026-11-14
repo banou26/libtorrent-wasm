@@ -10,6 +10,11 @@ export const SLICE = 16 * 1024
 /** Bytes a stream keeps before anything reads it. A peer's handshake is 68. */
 export const MAX_HELD = 1024 * 1024
 
+// libtorrent gives up on a remote that sends nothing at its handshake timeout, 10 s. A stream it destroys sooner
+// was ended for a reason of its own, a pause for one: after quick pauses and resumes it destroyed fresh streams
+// 17 to 264 ms after they opened (2026-11-15).
+const CUT_SHORT_MS = 5000
+
 /**
  * One peer connection as the socket libtorrent's shim takes from a host: what `Session.addPeerStream` is given.
  *
@@ -43,7 +48,8 @@ export class Stream implements PeerStream {
   private heldBytes = 0
   private ended: Error | boolean = false
   private heard = false
-  private destroyed = false
+  private readonly openedAt = Date.now()
+  private destroyedAfter: number | null = null
 
   constructor(private readonly sink: StreamSink) {}
 
@@ -75,10 +81,12 @@ export class Stream implements PeerStream {
   // 10.4 to 12.7 s later (50 channels).
   /**
    * It has ended and the remote never sent a byte, whichever end closed it. A stream its reader let go without
-   * ever reading it does not count: that says nothing about the remote.
+   * ever reading it does not count, nor one its reader destroyed in its first 5 s: neither says anything about
+   * the remote.
    */
   get silent(): boolean {
-    return this.ended !== false && !this.heard && (!this.destroyed || this.listenerCount('data') > 0)
+    if (this.ended === false || this.heard) return false
+    return this.destroyedAfter === null || (this.listenerCount('data') > 0 && this.destroyedAfter >= CUT_SHORT_MS)
   }
 
   write(bytes: Uint8Array): boolean {
@@ -88,7 +96,7 @@ export class Stream implements PeerStream {
   destroy() {
     if (this.ended) return
     this.ended = true
-    this.destroyed = true
+    this.destroyedAfter = Date.now() - this.openedAt
     this.held = null
     this.sink.close()
   }

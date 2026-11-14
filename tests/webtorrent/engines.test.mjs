@@ -112,21 +112,27 @@ const cutOff = async (t, RTCPeerConnection) => {
 /**
  * `b` downloads what `a` seeds, is paused once its channel is open and its metadata in (as ripple parks a
  * download page's torrent), and is resumed. With `cut`, `a` takes no stream, so each end sees the other silent.
+ * With `mute`, `b` is paused as its first channel opens, before a byte from `a` arrived (`a` sends none on it).
  * Null without the reference tracker.
  */
-const pausedAndResumed = async (t, RTCPeerConnection, { cut = false } = {}) => {
+const pausedAndResumed = async (t, RTCPeerConnection, { cut = false, mute = false } = {}) => {
   const defer = teardown(t)
   const reference = await referenceTracker(t)
   if (!reference) return null
   Routed = routedWebSocket(reference.url)
   const there = fixture(defer, 4 * MiB)
-  const a = await side(defer, path.join(there.root, 'a'), RTCPeerConnection, cut ? { cut } : undefined)
+  const a = await side(defer, path.join(there.root, 'a'), RTCPeerConnection, cut || mute ? { cut, mute } : undefined)
   const b = await side(defer, path.join(there.root, 'b'), RTCPeerConnection, {})
   await seed(a, there, 'there')
   // far from done when it is paused
   b.session.setRateLimits({ download: 64 * 1024 })
   const handle = await b.running(b.session.addMagnet(magnetOf(there), '/there'))
   if (cut) await waitFor('the seed to be silent', () => b.of(handle)?.silent === 1)
+  // a pause ends only a stream the engine has dialled; one it has not is closed by the swarm's own stop
+  else if (mute) await waitFor('a channel the engine dialled', () => {
+    void b.session.peers(handle)
+    return b.of(handle)?.open === 1 && b.session.lastPeers(handle).length === 1
+  })
   else await waitFor('a channel and the metadata', () => b.of(handle)?.open === 1 && b.session.status(handle)?.hasMetadata)
   b.session.pauseTorrent(handle)
   await waitFor('the swarm to stop it', () => !b.of(handle))
@@ -137,8 +143,8 @@ const pausedAndResumed = async (t, RTCPeerConnection, { cut = false } = {}) => {
 
 // The seed left the id whose channel closed alone for 60 s, and the next offer waited for the tracker's interval,
 // 120 s at the reference tracker.
-const backAtOnce = async (t, RTCPeerConnection) => {
-  const run = await pausedAndResumed(t, RTCPeerConnection)
+const backAtOnce = async (t, RTCPeerConnection, options) => {
+  const run = await pausedAndResumed(t, RTCPeerConnection, options)
   if (!run) return t.skip('bittorrent-tracker is not installed')
   const { b, there, handle } = run
   await waitFor('a channel again', () => b.of(handle)?.open === 1, 10_000)
@@ -203,6 +209,11 @@ test('with a session that takes no stream the same download never starts: the st
 
 test('a download paused once its channel is open and resumed has its seed back at once, and finishes', async (t) => {
   await backAtOnce(t, fakeRtc())
+})
+
+// libtorrent ends a paused torrent's streams itself: one that opened a moment before says nothing about its remote.
+test('a download paused as its channel opens, before a byte from the seed, has the seed back at once when resumed', async (t) => {
+  await backAtOnce(t, fakeRtc(), { mute: true })
 })
 
 test('a seed that never spoke is still left alone after the download that saw it is paused and resumed', async (t) => {

@@ -338,8 +338,8 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
 
   /**
    * Leaves the remote of an attempt that ended alone for a while: for ten minutes, and its answers too, when
-   * its channel had opened and ended, by its doing or the engine's, without a byte from it having arrived. An
-   * attempt the swarm itself gives up is not that: its stream has not ended when this runs.
+   * its stream says it stayed silent. An attempt the swarm itself gives up is not that: its stream has not
+   * ended when this runs.
    */
   const quieten = (t: Torrent, remote: string, conn: Conn) => {
     const silent = conn.socket?.silent ?? false
