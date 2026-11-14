@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Banou <me@banou.dev>
+Date: Sun, 15 Nov 2026 07:00:00 +0900
+Subject: [PATCH] fix: a resumed torrent dials the peers it had at once
+
+---
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+index de17c5bbf..b74b71219 100644
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -10045,6 +10045,15 @@ namespace {
+ 		update_want_scrape();
+ 		update_gauge();
+ 
++		// WASM patch: the pause closed every connection, and each close stamped the peer's
++		// last_connected, which keeps it from being dialled for min_reconnect_time (60 s): the next
++		// byte came 60 s after the pause began, however short it was. Cleared, as leaving upload
++		// mode does, so the boost below dials the peers the torrent had at once (0.6 to 1.8 s).
++		if (m_peer_list)
++		{
++			for (auto pe : *m_peer_list) pe->last_connected = 0;
++		}
++
+ 		if (m_state == torrent_status::checking_files) return;
+ 
+ 		start_announcing();
