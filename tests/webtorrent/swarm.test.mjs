@@ -658,6 +658,62 @@ test('a remote left alone for those 60 s still has its answer to an offer of our
   assert.equal(r.peers.snapshot().torrents[0].silent, 0)
 })
 
+/**
+ * A download 51 s in, at a tracker that counts one peer who is not there, so it has somebody to offer to, and
+ * that asks an interval of 600 s, so no announce of its own offers in the minutes that follow. Its first offer,
+ * to nobody, was closed unanswered at 50 s.
+ */
+const lonely = async t => {
+  const r = rig(t)
+  r.tracker.interval = 600
+  r.tracker.phantoms = { complete: 1, incomplete: 0 }
+  await r.start(1)
+  await advance(t, 51 * SECOND, SECOND)
+  return r
+}
+
+/** A remote opens a channel to the download, sends a byte unless `silent`, and closes it. */
+const lose = async (r, { silent = false } = {}) => {
+  const remote = new Remote(r)
+  assert.equal(await remote.connect(1), true)
+  if (!silent) remote.sockets[0].write(Buffer.of(19))
+  await settle()
+  remote.sockets[0].destroy()
+  await settle()
+}
+
+/** Connections made, and announces of the download that carried offers. */
+const madeAndOffered = r => [r.rtc.stats.made, r.offered(1).length]
+
+test('a download whose open channel closed offers again 65 s after the close, whatever the tracker’s interval', async t => {
+  const r = await lonely(t)
+  await lose(r)
+  const [made, offered] = madeAndOffered(r)
+  await advance(t, 64 * SECOND, SECOND)
+  assert.deepEqual(madeAndOffered(r), [made, offered], 'the remote leaves our id alone for 60 s from when it saw the close, until its next beat')
+  await advance(t, 2 * SECOND, SECOND)
+  assert.deepEqual(madeAndOffered(r), [made + 1, offered + 1])
+})
+
+test('a remote that closed its channel without a byte brings no early offer: it is left alone ten minutes', async t => {
+  const r = await lonely(t)
+  await lose(r, { silent: true })
+  assert.equal(r.peers.snapshot().torrents[0].silent, 1)
+  const before = madeAndOffered(r)
+  await advance(t, 66 * SECOND, SECOND)
+  assert.deepEqual(madeAndOffered(r), before)
+})
+
+test('an attempt that never opened brings no early offer', async t => {
+  const r = await lonely(t)
+  await new Remote(r, undefined, fakeRtc({ mute: true })).offer(1)
+  const before = madeAndOffered(r)
+  await advance(t, 31 * SECOND, SECOND)
+  assert.equal(r.live(), 0, 'it is given up at 30 s')
+  await advance(t, 66 * SECOND, SECOND)
+  assert.deepEqual(madeAndOffered(r), before)
+})
+
 /** The engine gives a stream up, as libtorrent does one whose remote never sent its handshake. */
 const giveUp = async stream => {
   stream.socket.destroy()
