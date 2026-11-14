@@ -468,9 +468,13 @@ void emit_peers(lt::peer_info_alert const* a) {
  * looking at a tracker list wants one row per tracker, so this collapses that: the row carries the
  * URL and tier, and the status reported is the healthiest endpoint's, since a tracker reachable
  * over any interface is a tracker that works.
+ *
+ * Only the protocols the torrent has count. libtorrent never announces the other one, so its slot
+ * keeps zero failures and would make every tracker of a v1-only or v2-only torrent read as working.
  */
 void emit_trackers(lt::tracker_list_alert const* a) {
-  std::uint32_t const hid = handle_id_for_hash(a->handle.info_hashes().get_best());
+  lt::info_hash_t const hashes = a->handle.info_hashes();
+  std::uint32_t const hid = handle_id_for_hash(hashes.get_best());
   if (hid == 0) return;
   std::vector<std::uint8_t> p;
   auto u32 = [&](std::uint32_t v){ auto* b = reinterpret_cast<std::uint8_t*>(&v); p.insert(p.end(), b, b + 4); };
@@ -483,8 +487,8 @@ void emit_trackers(lt::tracker_list_alert const* a) {
   u32(static_cast<std::uint32_t>(a->trackers.size()));
   auto const now = lt::clock_type::now();
   for (auto const& t : a->trackers) {
-    // Best across every endpoint and both protocol versions. `fails` is what decides: zero is
-    // working, and the lowest count is the closest this tracker has come to answering.
+    // Best across every endpoint and the torrent's protocol versions. `fails` is what decides: zero
+    // is working, and the lowest count is the closest this tracker has come to answering.
     int best_fails = -1;
     bool updating = false;
     bool verified = t.verified;
@@ -492,7 +496,9 @@ void emit_trackers(lt::tracker_list_alert const* a) {
     std::int32_t next_in = -1;
     std::string message;
     for (auto const& ep : t.endpoints) {
-      for (auto const& ih : ep.info_hashes) {
+      for (lt::protocol_version const v : {lt::protocol_version::V1, lt::protocol_version::V2}) {
+        if (!hashes.has(v)) continue;
+        auto const& ih = ep.info_hashes[v];
         if (ih.updating) updating = true;
         if (best_fails < 0 || ih.fails < best_fails) {
           best_fails = ih.fails;
