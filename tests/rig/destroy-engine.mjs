@@ -1,11 +1,12 @@
-// node tests/rig/destroy-engine.mjs <variant> <ms>: a session destroyed <ms> after its uTP connects are out, then a
-// second session in the same process downloads a torrent from a loopback peer and is destroyed too. Prints one JSON
-// line and then has to end by itself, so the test that runs it can tell an abort, a hang and a clean end apart.
+// node tests/rig/destroy-engine.mjs <variant> <ms>: a session destroyed <ms> after its mark, then a second session in
+// the same process downloads a torrent from a loopback peer and is destroyed too. Prints one JSON line and then has to
+// end by itself, so the test that runs it can tell an abort, a hang and a clean end apart.
 //
-//   one     a magnet naming one peer (x.pe), which is tried over uTP first
-//   four    a magnet naming four
-//   pex     a peer on a stream serves the metadata and names four peers in peer exchange
-//   remove  one peer, and the torrent removed in the same turn as the destroy
+//   one      a magnet naming one peer (x.pe), which is tried over uTP first; the mark is a SYN to each named peer
+//   four     a magnet naming four
+//   pex      a peer on a stream serves the metadata and names four peers in peer exchange
+//   remove   one peer, and the torrent removed in the same turn as the destroy
+//   limited  a download under a ceiling from a seed engine over uTP; the mark is the first byte
 //
 // The named peers are in TEST-NET-3, whose datagrams the host drops, so each connect stays in progress until uTP
 // gives up and the engine tries TCP instead, about 4 s after its first SYN.
@@ -18,7 +19,7 @@ import path from 'node:path'
 
 import { TORRENT_STATE, createSession } from '../../build/index.js'
 import { countingHost } from './counting-host.mjs'
-import { bdecode, bencode, makeTorrent, writeFixture } from './make-torrent.mjs'
+import { bdecode, bencode, magnetFor, makeTorrent, writeFixture } from './make-torrent.mjs'
 import { NodeFSStorage } from './node-storage.mjs'
 import { waitFor } from './peer-handshake.mjs'
 import { ScriptedPeer } from './scripted-peer.mjs'
@@ -53,11 +54,20 @@ const trackedHost = (options) => {
   }
 }
 
-const start = async (dir, host) => {
-  const storage = new NodeFSStorage(dir)
+/** NodeFSStorage, keeping the ids of every storage made and removed. */
+class CountingStorage extends NodeFSStorage {
+  made = []
+  removed = []
+  onNewStorage(id, ...rest) { this.made.push(id); return super.onNewStorage(id, ...rest) }
+  onRemoveStorage(id) { this.removed.push(id); return super.onRemoveStorage(id) }
+}
+
+const start = async (dir, host, options = {}) => {
+  const storage = new CountingStorage(dir)
   const session = await createSession({
     storage, enableDht: false, reserveListenPort: false,
     net: host.net, dgram: host.dgram, dnsLookup: host.dnsLookup,
+    ...options,
   })
   for (let i = 0; i < 30; i++) session.tick()
   const handles = new Set()
@@ -65,18 +75,21 @@ const start = async (dir, host) => {
     session.popAlerts()
     for (const h of handles) session.postStatus(h)
   }, 100)
+  const watch = (handle) => handles.add(handle)
   const running = (handle) => {
-    handles.add(handle)
+    watch(handle)
     return waitFor('the torrent to start', () => {
       const st = session.status(handle)
       return st && !st.paused && st.state !== TORRENT_STATE.checkingFiles && st.state !== TORRENT_STATE.checkingResumeData
     }).then(() => handle)
   }
-  return { session, storage, running, stop: () => clearInterval(pump) }
+  return { session, storage, watch, running, stop: () => clearInterval(pump) }
 }
 
-const destroyed = (session, before = () => {}) => {
+/** Destroys the engine; `storages` holds the ids of the storages it made and of those the destroy removed, sorted. */
+const destroyed = ({ session, storage }, before = () => {}) => {
   const t0 = performance.now()
+  const removedBefore = storage.removed.length
   let outcome = 'clean'
   try {
     before()
@@ -84,15 +97,35 @@ const destroyed = (session, before = () => {}) => {
   } catch (error) {
     outcome = /Aborted/.test(String(error)) ? 'abort' : String(error).slice(0, 200)
   }
-  return { outcome, ms: Math.round(performance.now() - t0) }
+  return {
+    outcome,
+    ms: Math.round(performance.now() - t0),
+    storages: { made: [...storage.made].sort(), removed: storage.removed.slice(removedBefore).sort() },
+  }
 }
 
-// the first session, destroyed during its uTP connects
+// the first session, destroyed during its uTP connects, or under a ceiling while a seed engine sends it the torrent
 const hostA = trackedHost()
-const a = await start(path.join(root, 'a'), hostA)
+const seedHost = trackedHost()
+let seed = null
+let a
 let handle
-let named
-if (variant === 'pex') {
+let named = []
+let transport
+if (variant === 'limited') {
+  const file = path.join(root, 'seed', 'limited.bin')
+  writeFixture(file, 32 * 1024 * 1024, crypto.randomInt(1, 2 ** 31))
+  const meta = makeTorrent({ file, pieceLength: 256 * 1024 })
+  seed = await start(root, seedHost, { reserveListenPort: true })
+  const seeding = await seed.running(seed.session.addTorrentFile(meta.torrent, '/seed'))
+  const port = await waitFor('the seed', () => seed.session.status(seeding)?.state === TORRENT_STATE.seeding && seed.session.reachable().port)
+  a = await start(path.join(root, 'a'), hostA, { rateLimits: { download: 300 * 1024 } })
+  handle = a.session.addMagnet(magnetFor(meta.infoHash, meta.name, [{ host: '127.0.0.1', port }]), '/dl')
+  a.watch(handle)
+  await waitFor('the first byte', () => a.session.status(handle)?.totalDone > 0, 30_000)
+  transport = (await a.session.peers(handle)).map((p) => p.transport)
+} else if (variant === 'pex') {
+  a = await start(path.join(root, 'a'), hostA)
   const file = path.join(root, 'pex.bin')
   writeFixture(file, 256 * 1024, crypto.randomInt(1, 2 ** 31))
   const meta = makeTorrent({ file, pieceLength: 16 * 1024 })
@@ -105,6 +138,7 @@ if (variant === 'pex') {
   named = ['203.0.113.70', '203.0.113.71', '203.0.113.72', '203.0.113.73']
   peer.sendPex(named.map((address) => `${address}:6881`))
 } else {
+  a = await start(path.join(root, 'a'), hostA)
   named = Array.from({ length: variant === 'four' ? 4 : 1 }, (_, i) => `203.0.113.${50 + i}`)
   const hash = crypto.randomBytes(20).toString('hex')
   handle = await a.running(a.session.addMagnet(`magnet:?xt=urn:btih:${hash}${named.map((address) => `&x.pe=${address}:6881`).join('')}`, '/dl'))
@@ -112,9 +146,13 @@ if (variant === 'pex') {
 await waitFor('a SYN to each named peer', () => named.every((address) => hostA.datagrams.some((d) => d.address === address)), 10_000)
 await sleep(ms)
 a.stop()
-const first = { connects: hostA.connects.length, ...destroyed(a.session, () => { if (variant === 'remove') a.session.removeTorrent(handle) }) }
-await waitFor('the first session\'s sockets to close', () => hostA.open().length === 0, 2000).catch(() => {})
-first.open = hostA.open()
+const first = { connects: hostA.connects.length, transport, ...destroyed(a, () => { if (variant === 'remove') a.session.removeTorrent(handle) }) }
+if (seed) {
+  seed.stop()
+  first.seed = destroyed(seed)
+}
+await waitFor('the first session\'s sockets to close', () => hostA.open().length + seedHost.open().length === 0, 2000).catch(() => {})
+first.open = [...hostA.open(), ...seedHost.open()]
 // what keeps this process alive, the destroyed session's part of it included; stdio is this script's own
 first.resources = process.getActiveResourcesInfo().filter((r) => r !== 'TTYWrap' && r !== 'PipeWrap')
 
@@ -140,7 +178,7 @@ const saved = fs.readFileSync(b.storage.filePath(b.session.files(hb).storageInde
 b.stop()
 const second = {
   sameBytes: saved.equals(bytes),
-  ...destroyed(b.session),
+  ...destroyed(b),
 }
 for (const socket of accepted) socket.destroy()
 server.close()
