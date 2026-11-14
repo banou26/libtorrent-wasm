@@ -145,6 +145,34 @@ lt::torrent_handle* lookup_handle(std::uint32_t id) {
   return it == g_session->handles.end() ? nullptr : &it->second;
 }
 
+// the hash_ids key an add gave out with this id, or null when no add did
+std::string const* key_of(std::uint32_t id) {
+  auto const& ids = g_session->hash_ids;
+  auto const it = std::find_if(ids.begin(), ids.end(), [id](auto const& e) { return e.second == id; });
+  return it == ids.end() ? nullptr : &it->first;
+}
+
+// On the io_context only: from JS, find_torrent is a sync_call that would deadlock.
+lt::torrent_handle find_by_key(std::string const& key) {
+  return g_session->ses->native_handle()->find_torrent_handle(lt::info_hash_t(lt::sha1_hash(key.data())));
+}
+
+// Runs `fn` on the torrent the id names, on the io_context and in order behind the adds and commands
+// asked before it, so a command holds from the add that gave the id out, before the alert pass has
+// registered its handle. A torrent gone by then is left alone. -1 only for an id no add gave out.
+// The handle's calls dispatch, so `fn` runs them inline: one hop, like a call made on a registered
+// handle, which keeps it in order with those (a file priority then the piece priorities it resets).
+template <class Fn> int on_torrent(std::uint32_t id, Fn fn) {
+  if (!g_session) return -1;
+  auto const* key = key_of(id);
+  if (!key) return -1;
+  boost::asio::post(*g_session->ioc, [key = *key, fn = std::move(fn)] {
+    auto const h = find_by_key(key);
+    if (h.is_valid()) fn(h);
+  });
+  return 0;
+}
+
 // null until the torrent-ready record has been built for this handle
 torrent_geometry const* geometry_for(std::uint32_t id) {
   auto it = g_session->geometry.find(id);
@@ -979,19 +1007,16 @@ LT_API int lt_session_add_torrent_file(
   return static_cast<int>(id);
 }
 
-// -1 only for an id no add gave out. The torrent is found by its info-hash on the io_context, in
-// order behind the adds asked before it, because its handle is registered only by the alert pass
-// and find_torrent from here is a sync_call that would deadlock.
+// -1 only for an id no add gave out. Posted as on_torrent posts, and its own, as `removing` must
+// let go of the key whether or not the torrent is still there.
 LT_API int lt_session_remove_torrent_ex(std::uint32_t id, int delete_files) {
   if (!g_session) return -1;
-  auto const& ids = g_session->hash_ids;
-  auto const it = std::find_if(ids.begin(), ids.end(), [id](auto const& e) { return e.second == id; });
-  if (it == ids.end()) return -1;
+  auto const* key = key_of(id);
+  if (!key) return -1;
   lt::remove_flags_t const flags = delete_files ? lt::session_handle::delete_files : lt::remove_flags_t{};
-  g_session->removing.insert(it->first);
-  boost::asio::post(*g_session->ioc, [key = it->first, flags] {
-    auto const s = g_session->ses->native_handle();
-    s->remove_torrent(s->find_torrent_handle(lt::info_hash_t(lt::sha1_hash(key.data()))), flags);
+  g_session->removing.insert(*key);
+  boost::asio::post(*g_session->ioc, [key = *key, flags] {
+    g_session->ses->native_handle()->remove_torrent(find_by_key(key), flags);
     g_session->removing.erase(g_session->removing.find(key));
   });
   g_session->handles.erase(id);
@@ -1004,40 +1029,30 @@ LT_API int lt_session_remove_torrent(std::uint32_t id) { return lt_session_remov
 
 // order matters: unset auto_managed first or the queue logic auto-resumes it
 LT_API int lt_torrent_pause(std::uint32_t id) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h) return -1;
-  h->unset_flags(lt::torrent_flags::auto_managed);
-  h->pause();
-  return 0;
+  return on_torrent(id, [](lt::torrent_handle const& h) {
+    h.unset_flags(lt::torrent_flags::auto_managed);
+    h.pause();
+  });
 }
 
 LT_API int lt_torrent_resume(std::uint32_t id) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h) return -1;
-  h->set_flags(lt::torrent_flags::auto_managed);
-  h->resume();
-  return 0;
+  return on_torrent(id, [](lt::torrent_handle const& h) {
+    h.set_flags(lt::torrent_flags::auto_managed);
+    h.resume();
+  });
 }
 
 // should_check_files only schedules the hash pass for a torrent that is neither paused nor errored, hence the resume first
 LT_API int lt_torrent_force_recheck(std::uint32_t id) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h) return -1;
-  h->set_flags(lt::torrent_flags::auto_managed);
-  h->resume();
-  h->force_recheck();
-  return 0;
+  return on_torrent(id, [](lt::torrent_handle const& h) {
+    h.set_flags(lt::torrent_flags::auto_managed);
+    h.resume();
+    h.force_recheck();
+  });
 }
 
 LT_API int lt_torrent_save_resume_data(std::uint32_t id) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h) return -1;
-  h->save_resume_data(lt::torrent_handle::save_info_dict);
-  return 0;
+  return on_torrent(id, [](lt::torrent_handle const& h) { h.save_resume_data(lt::torrent_handle::save_info_dict); });
 }
 
 // no_verify_files makes libtorrent TRUST the resume have-bitmask against the files on disk: no recheck, no re-download
@@ -1083,11 +1098,7 @@ struct torrent_status_out {
 
 // never call h->status() instead: every synchronous libtorrent getter sync_calls an io_context that only runs when JS ticks
 LT_API int lt_torrent_post_status(std::uint32_t id) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h || !h->is_valid()) return -1;
-  h->post_status();
-  return 0;
+  return on_torrent(id, [](lt::torrent_handle const& h) { h.post_status(); });
 }
 
 // stub kept for ABI compatibility; always returns -1 in the async model
@@ -1105,20 +1116,12 @@ LT_API int lt_torrent_status(std::uint32_t id, torrent_status_out* out) {
  * lt_diag_listen_port() shipped with exactly it and hung forever.
  */
 LT_API int lt_torrent_post_peers(std::uint32_t id) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h || !h->is_valid()) return -1;
-  h->post_peer_info();
-  return 0;
+  return on_torrent(id, [](lt::torrent_handle const& h) { h.post_peer_info(); });
 }
 
 // see lt_torrent_post_peers: h->trackers() is a sync_call and would deadlock the same way
 LT_API int lt_torrent_post_trackers(std::uint32_t id) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h || !h->is_valid()) return -1;
-  h->post_trackers();
-  return 0;
+  return on_torrent(id, [](lt::torrent_handle const& h) { h.post_trackers(); });
 }
 
 /**
@@ -1195,12 +1198,10 @@ LT_API int lt_torrent_private(std::uint32_t id) {
 
 // set_sequential_download() is ABI-v1-only; the modern path is set/unset_flags(sequential_download)
 LT_API int lt_torrent_set_sequential(std::uint32_t id, int on) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h || !h->is_valid()) return -1;
-  if (on) h->set_flags(lt::torrent_flags::sequential_download);
-  else    h->unset_flags(lt::torrent_flags::sequential_download);
-  return 0;
+  return on_torrent(id, [on](lt::torrent_handle const& h) {
+    if (on) h.set_flags(lt::torrent_flags::sequential_download);
+    else    h.unset_flags(lt::torrent_flags::sequential_download);
+  });
 }
 
 /**
@@ -1220,12 +1221,10 @@ static_assert(static_cast<std::uint64_t>(lt::torrent_flags::i2p_torrent) < (std:
     "a torrent flag now lives above bit 31; lt_torrent_set_flags must carry 64 bits");
 
 LT_API int lt_torrent_set_flags(std::uint32_t id, std::uint32_t flags, std::uint32_t mask) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h || !h->is_valid()) return -1;
-  h->set_flags(lt::torrent_flags_t(static_cast<std::uint64_t>(flags)),
-               lt::torrent_flags_t(static_cast<std::uint64_t>(mask)));
-  return 0;
+  return on_torrent(id, [flags, mask](lt::torrent_handle const& h) {
+    h.set_flags(lt::torrent_flags_t(static_cast<std::uint64_t>(flags)),
+                lt::torrent_flags_t(static_cast<std::uint64_t>(mask)));
+  });
 }
 
 // Names a peer that Session.addPeerStream stands behind a made-up address (IPv4, host byte order),
@@ -1255,44 +1254,30 @@ LT_API int lt_torrent_add_channel_peer(std::uint32_t id, std::uint32_t ipv4, int
  * menu item cannot turn it into a flood aimed at a tracker.
  */
 LT_API int lt_torrent_force_reannounce(std::uint32_t id) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h || !h->is_valid()) return -1;
-  h->force_reannounce();
-  return 0;
+  return on_torrent(id, [](lt::torrent_handle const& h) { h.force_reannounce(); });
 }
 
 // 0 top, 1 up, 2 down, 3 bottom. Position is only meaningful for an auto-managed torrent, which is
 // why the caller is expected to hide this when the queue is not what is holding the torrent back.
 LT_API int lt_torrent_queue_position(std::uint32_t id, int where) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h || !h->is_valid()) return -1;
-  switch (where) {
-    case 0: h->queue_position_top(); break;
-    case 1: h->queue_position_up(); break;
-    case 2: h->queue_position_down(); break;
-    case 3: h->queue_position_bottom(); break;
-    default: return -1;
-  }
-  return 0;
+  if (where < 0 || where > 3) return -1;
+  return on_torrent(id, [where](lt::torrent_handle const& h) {
+    switch (where) {
+      case 0: h.queue_position_top(); break;
+      case 1: h.queue_position_up(); break;
+      case 2: h.queue_position_down(); break;
+      default: h.queue_position_bottom(); break;
+    }
+  });
 }
 
 // bytes per second, 0 for unlimited. Per torrent, and independent of the relay's own metering.
 LT_API int lt_torrent_set_upload_limit(std::uint32_t id, std::int32_t bytes_per_second) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h || !h->is_valid()) return -1;
-  h->set_upload_limit(bytes_per_second);
-  return 0;
+  return on_torrent(id, [bytes_per_second](lt::torrent_handle const& h) { h.set_upload_limit(bytes_per_second); });
 }
 
 LT_API int lt_torrent_set_download_limit(std::uint32_t id, std::int32_t bytes_per_second) {
-  if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h || !h->is_valid()) return -1;
-  h->set_download_limit(bytes_per_second);
-  return 0;
+  return on_torrent(id, [bytes_per_second](lt::torrent_handle const& h) { h.set_download_limit(bytes_per_second); });
 }
 
 LT_API int lt_torrent_read_piece(std::uint32_t id, std::int32_t piece) {
@@ -1393,13 +1378,10 @@ LT_API int lt_torrent_prioritize_piece_list(std::uint32_t id, std::int32_t const
 // priority to match, so piece-level priorities have to be re-applied after this.
 LT_API int lt_torrent_prioritize_files(std::uint32_t id,
                                        std::uint8_t const* prios, std::uint32_t count) {
-  if (!g_session || !prios) return -1;
-  auto* h = lookup_handle(id);
-  if (!h || !h->is_valid()) return -1;
+  if (!prios) return -1;
   std::vector<lt::download_priority_t> v(count);
   for (std::uint32_t i = 0; i < count; ++i) v[i] = clamp_prio(prios[i]);
-  h->prioritize_files(v);
-  return 0;
+  return on_torrent(id, [v = std::move(v)](lt::torrent_handle const& h) { h.prioritize_files(v); });
 }
 
 // Take a piece back from whatever peers are sitting on it, by cancelling every outstanding request
@@ -1555,12 +1537,9 @@ LT_API int lt_session_redial_cut_peers() {
 
 LT_API int lt_torrent_set_file_priority(std::uint32_t id, std::int32_t file, std::uint8_t prio) {
   if (!g_session) return -1;
-  auto* h = lookup_handle(id);
-  if (!h || !h->is_valid()) return -1;
   // libtorrent deliberately supports selecting a file before metadata arrives, so only bound the
   // index once the file count is actually known
   auto const* geo = geometry_for(id);
   if (file < 0 || (geo && file >= geo->num_files)) return -1;
-  h->file_priority(lt::file_index_t{file}, clamp_prio(prio));
-  return 0;
+  return on_torrent(id, [file, p = clamp_prio(prio)](lt::torrent_handle const& h) { h.file_priority(lt::file_index_t{file}, p); });
 }

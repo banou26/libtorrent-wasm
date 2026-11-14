@@ -674,6 +674,7 @@ export class Session {
    *
    * A handle is listed from the call that added it, which is before the engine can say anything
    * about the torrent: {@link status} and {@link infohash} answer null until alerts were pumped.
+   * A command takes it from that call on, and runs behind the add.
    */
   torrents(): number[] { return [...this.handles] }
 
