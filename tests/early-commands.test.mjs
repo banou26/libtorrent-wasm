@@ -207,6 +207,17 @@ test('a save asked and then a remove in the same turn is refused at the remove',
   assert.deepEqual(await Promise.all(answers), ['refused', 'refused'])
 })
 
+test('a save asked after destroy() is refused at once', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const { session } = await engineHolding(defer, fx)
+
+  const h = session.addTorrentFile(fx.meta.torrent, '/dl')
+  session.destroy()
+  const answer = await Promise.race([session.saveResumeData(h, 3000).then(() => 'saved', () => 'refused'), sleep(500).then(() => 'waiting')])
+  assert.equal(answer, 'refused')
+})
+
 test('every command takes a handle from its add, and answers -1, as a remove does, for one never given out', async (t) => {
   const defer = teardown(t)
   const fx = fixture(defer, MiB)
