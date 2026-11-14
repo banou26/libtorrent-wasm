@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Banou <me@banou.dev>
+Date: Sat, 14 Nov 2026 22:00:00 +0900
+Subject: [PATCH] fix: a session abort fails its uTP sockets at once
+
+---
+diff --git a/src/session_impl.cpp b/src/session_impl.cpp
+--- a/src/session_impl.cpp
++++ b/src/session_impl.cpp
+@@ -1139,6 +1139,11 @@ bool ssl_server_name_callback(ssl::stream_handle_type stream_handle, std::string
+ 			// the uTP connections cannot be closed gracefully
+ 			if (l->udp_sock)
+ 			{
++				// WASM patch: fail the uTP sockets on it now, as closing a TCP socket fails its pending
++				// operations. A uTP stream's connect and read handlers hold the peer connection that owns
++				// it, so upstream waits for the socket's resends to give up; the wrapper ends a session
++				// without waiting, and a socket still attached then is freed after its packet pool.
++				m_utp_socket_manager.remove_udp_socket(l);
+ 				l->udp_sock->sock.close();
+ 			}
+ 		}
