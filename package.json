@@ -61,6 +61,9 @@
     "test:swarm": "node tests/rig/run.mjs",
     "test:bad-peer": "node tests/rig/bad-swarm.mjs"
   },
+  "dependencies": {
+    "@banou/ponyfill": "^0.0.15"
+  },
   "peerDependencies": {
     "@fkn/lib": ">=0.5.0"
   },

@@ -39,7 +39,8 @@ export default defineConfig({
     },
     rollupOptions: {
       // `src/index.ts` dynamic-imports `./libtorrent.js` at runtime, which copy-wasm puts alongside the bundle.
-      external: ['./libtorrent.js', '../dist/libtorrent.js'],
+      // The ponyfill is left for the app to resolve, so an app that imports it too ships one copy.
+      external: ['./libtorrent.js', '../dist/libtorrent.js', /^@banou\/ponyfill/],
       output: {
         entryFileNames: '[name].js',
         // A fixed name: `build` is never emptied and ships whole, so a name with a content hash would leave
