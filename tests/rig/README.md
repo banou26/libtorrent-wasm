@@ -58,6 +58,7 @@ nix build --no-link --print-out-paths 'nixpkgs#transmission_4'
 | `stream-pipe.mjs` | an in-memory byte stream with two ends, each the socket `Session.addPeerStream` takes; optional pacing and backpressure |
 | `stream-engine.mjs` | what the peer stream tests share: an engine on `offlineHost()` with its pump, a fixture, a seeder, one ordered teardown |
 | `counting-host.mjs` | node's sockets with every connect and datagram recorded, and nothing allowed off this machine |
+| `destroy-engine.mjs` | one process of `tests/session-destroy.test.mjs`: a session destroyed during its uTP connects, then a second one that downloads, one JSON line, and the process has to end by itself |
 | `offline-engine.mjs` | the engine in a worker thread on `offlineHost()`, reporting what it asked of the host |
 | `rel-outage.mjs` | the relay mode through a relay outage, timed: a download with a uTP peer and a WebRTC peer on loopback, the relay taken away and brought back; `--queued` has this end send into the outage |
 | `relay-host.mjs` | node's sockets on loopback behind a relay that can be taken away and brought back, with `@fkn/lib`'s events; the ports its sockets held can come back taken |

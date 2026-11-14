@@ -73,8 +73,7 @@ export const startEngine = async (defer, dir, { host = offlineHost(), ...options
   }, 100)
   defer(() => {
     clearInterval(pump)
-    // destroy() aborts inside the wasm while a uTP connect is in progress (a test that failed
-    // early can leave one), and then never reaches the shim's teardown, which closes the sockets
+    // the shim's teardown closes the host's sockets even when destroy() throws, or the file never ends
     try { session.destroy() } finally { session.mod.__FKN?.teardown?.() }
   })
 
