@@ -31,4 +31,8 @@ void wasm_disk_requeue_ready(std::uint32_t storage_index);
 // returns 0 on success, not a bool
 int wasm_disk_storage_info(std::uint32_t storage_index, wasm_storage_info* out);
 
+// For a session that is never freed (lt_session_destroy): each storage still held is removed, as its
+// torrent's destructor would have, and a disk call answered later reaches nothing.
+void wasm_disk_end();
+
 } // namespace libtorrent

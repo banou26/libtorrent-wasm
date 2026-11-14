@@ -717,6 +717,11 @@ struct wasm_disk_io final
     return true;
   }
 
+  void remove_all() {
+    for (std::size_t i = 0; i < m_storages.size(); ++i)
+      if (m_storages[i].fs) remove_torrent(storage_index_t{static_cast<std::uint32_t>(i)});
+  }
+
 private:
   storage_entry const* storage_at(storage_index_t idx) const {
     auto i = static_cast<std::size_t>(static_cast<int>(idx));
@@ -781,6 +786,13 @@ void wasm_disk_requeue_ready(std::uint32_t storage_index) {
 int wasm_disk_storage_info(std::uint32_t storage_index, wasm_storage_info* out) {
   if (!g_disk_io || !out) return -1;
   return g_disk_io->query_storage(storage_index, *out) ? 0 : -1;
+}
+
+void wasm_disk_end() {
+  if (!g_disk_io) return;
+  g_disk_io->remove_all();
+  g_disk_io = nullptr;
+  g_storage_ready_queue.clear();
 }
 
 std::unique_ptr<disk_interface> wasm_disk_io_constructor(

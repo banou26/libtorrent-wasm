@@ -76,11 +76,8 @@ struct torrent_geometry {
   std::int32_t num_files = 0;
 };
 
-// for lt_session_destroy: asio keeps execution_context::shutdown() protected
-struct session_io_context : lt::io_context { using boost::asio::execution_context::shutdown; };
-
 struct session_state {
-  std::unique_ptr<session_io_context> ioc;
+  std::unique_ptr<lt::io_context> ioc;
   std::unique_ptr<lt::session> ses;
 
   std::unordered_map<std::uint32_t, lt::torrent_handle> handles;
@@ -630,7 +627,7 @@ LT_API int lt_session_create() {
   if (g_session) return -1;
 
   g_session = new session_state();
-  g_session->ioc = std::make_unique<session_io_context>();
+  g_session->ioc = std::make_unique<lt::io_context>();
 
   lt::settings_pack sp;
   // one listen interface is required for outgoing connects, and for the UDP socket that carries uTP and the DHT
@@ -716,21 +713,21 @@ LT_API int lt_session_create() {
 LT_API void lt_session_destroy() {
   if (!g_session) return;
   g_session->handles.clear();
-  // libtorrent's order for a session on an io_context it does not own (session.hpp): abort, free the
-  // session, run the io_context, free the proxy. Freeing the io_context first destroys the queued
-  // abort unrun, so ~session_impl runs inside its teardown with every peer still up. libtorrent would
-  // then run until nothing is pending; this cannot wait, so shutdown() drops what is left (the next
-  // shutdown tick, whose handler is allocated inside the session) while the session is still alive.
+  // libtorrent's order for a session on an io_context it does not own (session.hpp) is abort, free the
+  // session, run the io_context until nothing is pending, free the proxy. What the abort leaves pending
+  // cannot end within this call (a uTP socket waits out its resends, a peer its bandwidth quota), and
+  // libtorrent's destructors run before it has ended free uTP sockets after their packet pool and peers
+  // after their sockets. So the aborted session and its io_context are never freed: they go with the
+  // module instance, one per createSession.
   auto& ioc = *g_session->ioc;
   auto const drain = [&ioc] { for (int i = 0; i < 1000 && ioc.poll() > 0; ++i) {} };
   // what this file posted (a remove) runs first, while the session it reaches through is whole
   drain();
-  lt::session_proxy proxy = g_session->ses->abort();
+  static_cast<void>(new lt::session_proxy(g_session->ses->abort()));
   g_session->ses.reset();
   drain();
-  ioc.shutdown();
-  proxy = lt::session_proxy();
-  g_session->ioc.reset();
+  lt::wasm_disk_end();
+  static_cast<void>(g_session->ioc.release());
   g_pending_alerts.data.clear();
   delete g_session;
   g_session = nullptr;
