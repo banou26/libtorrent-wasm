@@ -1,11 +1,13 @@
 // destroy() is clean, removes each storage once, leaves no socket or handle, and a second session works, with a uTP
-// peer still in its connect (one, four, pex, remove) or connected under a download ceiling (limited). Each run is a
-// process of its own (tests/rig/destroy-engine.mjs) that has to end by itself.
+// peer still in its connect (one, four, pex, remove) or connected under a download ceiling (limited), each run a
+// process of its own (tests/rig/destroy-engine.mjs) that has to end by itself; and a resume save it cuts short settles.
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import test from 'node:test'
+
+import { MiB, fixture, startEngine, teardown } from './rig/stream-engine.mjs'
 
 const SCRIPT = path.join(import.meta.dirname, 'rig', 'destroy-engine.mjs')
 // ms after the mark: the last SYN, as the tcp fallback comes 3.3 to 3.6 s after the first; or the first byte, as an
@@ -60,3 +62,16 @@ for (const [variant, delays] of Object.entries(DELAYS)) {
     }
   })
 }
+
+test('a resume save asked before destroy() is rejected by it, not left waiting', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const { session, running } = await startEngine(defer, path.join(fx.root, 'engine'))
+  const saving = session.saveResumeData(await running(session.addTorrentFile(fx.meta.torrent, '/dl')), 5000)
+  session.destroy()
+  const settled = await Promise.race([
+    saving.then(() => 'resolved', (error) => error.message),
+    new Promise((resolve) => setTimeout(resolve, 500, 'still waiting 500 ms after destroy()')),
+  ])
+  assert.equal(settled, 'save_resume_data: session destroyed')
+})
