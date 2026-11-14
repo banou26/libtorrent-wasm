@@ -1125,11 +1125,14 @@ test('with no relay a magnet whose metadata says it is private says stopped to t
   await r.start(2)
   assert.deepEqual(heard(r.tracker, 1), ['started'])
 
+  let changes = 0
+  r.peers.onchange = () => changes++
   r.session.set(1, { hasMetadata: true, private: true })
   await advance(t, SECOND)
   assert.deepEqual(heard(r.tracker, 1), ['started', 'stopped'], 'within a beat')
   assert.deepEqual(r.tracker.announces(hashOf(1)).map(message => message.left), [16 * 1024, 16 * 1024], 'the size the metadata brought is not told there')
   assert.deepEqual(r.peers.snapshot().torrents[0].trackers.map(tracker => tracker.url), ['wss://own.test/'])
+  assert.equal(changes, 1, 'and onchange says the snapshot lost a tracker')
 
   // ten minutes of announces, then the default's socket lost and back, then a pause and a resume
   await advance(t, 600 * SECOND, SECOND)
