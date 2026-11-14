@@ -572,9 +572,10 @@ once more, and each remote keeps its end of the old connection until its own sta
   no new connection and keeps what it has, except what a magnet whose metadata says private had at the passed
   trackers ([the direct mode](#the-direct-mode)): the engine checks for a moment when a magnet's metadata
   arrives, with its peers kept, and closes them itself for a recheck.
-- **A torrent that runs again has its peers back at once.** It runs under a new tracker id, since each remote
+- **A download that runs again has its peers back at once.** It runs under a new tracker id, since each remote
   leaves the id whose channel closed alone for 60 s, and leaves alone only the remotes that stayed silent, so a
-  pause and a resume cost no wait for the tracker's next interval. A download that leaves upload mode with its
+  pause and a resume cost no wait for the tracker's next interval. A seed makes no offers, so one that runs
+  again is found by its downloads at their next announce. A download that leaves upload mode with its
   metadata in starts again the same way: libtorrent drops every seed of a torrent in upload mode once the
   metadata is in, and dials its own peers again when the mode ends.
 - **An empty swarm costs no connection.** The first announce carries no offer; offers follow the count in the
