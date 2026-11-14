@@ -133,44 +133,51 @@ for (const answers of ['v1', 'v2']) {
 }
 
 // A forced reannounce gives every tracker a slot, asked or not, and a resume clears what libtorrent
-// knows of the started announces. The reannounce asks the refusing tracker again at once, and the
-// answering one only after its min interval, so the refusing one is what shows it has run.
+// knows of the started announces. The flaky tracker refuses until the reannounce and answers from it
+// on, so from then it ends each walk: the answering tracker, asked at the add only, has to go on
+// reading working through the pause and the resume.
 for (const { kind, xt, slots } of KINDS) {
   test(`${kind}: a tracker nobody asked reads not contacted after a reannounce, a pause and a resume`, async (t) => {
     const defer = teardown(t)
     const refusing = await httpTracker(defer, REFUSAL)
+    let flakyAnswers = false
+    const flaky = await httpTracker(defer, () => (flakyAnswers ? ANSWER : REFUSAL))
     const answering = await httpTracker(defer, ANSWER)
     const unasked = await httpTracker(defer, ANSWER)
     const { session, running } = await startEngine(defer, tempDir(defer), { host: countingHost() })
-    const urls = [refusing.url, answering.url, unasked.url]
+    const urls = [refusing.url, flaky.url, answering.url, unasked.url]
     const handle = await running(session.addMagnet(`magnet:?${xt()}${urls.map((url) => `&tr=${encodeURIComponent(url)}`).join('')}`, '/dl'))
-    const events = (name) => answering.events.filter((event) => event === name).length
+    const events = (tracker, name) => tracker.events.filter((event) => event === name).length
 
     const check = async (step) => {
       const rows = await rowsWhen(session, handle, (list) => list.length === urls.length && list.every((r) => !r.updating))
       const row = (url) => rows.find((r) => r.url === url)
       const shown = JSON.stringify(rows.map(({ url, fails, verified }) => ({ url, fails, verified })))
       assert.ok(row(refusing.url).fails > 0, `${step}: the refusing tracker reads ${row(refusing.url).fails} failures: ${shown}`)
+      assert.equal(row(flaky.url).fails > 0, !flakyAnswers, `${step}: the flaky tracker: ${shown}`)
       assert.equal(row(answering.url).fails, 0, `${step}: the tracker that answered reads failures: ${shown}`)
       assert.equal(row(answering.url).verified, true, `${step}: ${shown}`)
       assert.equal(unasked.asked, 0, `${step}: the tracker after the answering one was asked`)
       assert.equal(row(unasked.url).fails, -1, `${step}: a tracker nobody asked reads as asked: ${shown}`)
     }
 
-    await waitFor('every slot to reach the answering tracker', () => events('started') >= slots)
+    await waitFor('every slot to reach the answering tracker', () => events(answering, 'started') >= slots)
     await check('added')
 
-    const refused = refusing.asked
+    flakyAnswers = true
+    const refused = events(flaky, 'started')
     session.forceReannounce(handle)
-    await waitFor('the reannounce', () => refusing.asked >= refused + slots)
+    await waitFor('the reannounce', () => events(flaky, 'started') >= refused + slots)
     await check('reannounced')
 
     session.pauseTorrent(handle)
-    await waitFor('the stopped announces', () => events('stopped') >= slots)
+    await waitFor('the stopped announces', () => events(flaky, 'stopped') >= slots)
     await check('paused')
 
+    const answered = events(flaky, 'started')
     session.resumeTorrent(handle)
-    await waitFor('the started announces again', () => events('started') >= 2 * slots)
+    await waitFor('the started announces again', () => events(flaky, 'started') >= answered + slots)
     await check('resumed')
+    assert.equal(events(answering, 'started'), slots, 'the answering tracker was asked to start again')
   })
 }
