@@ -456,10 +456,10 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
    * leaves nobody keeps the round due: after a pause and a resume inside the tracker's round trip the first
    * reply is the one to `stopped`, which counts the swarm without us.
    */
-  const offerRound = async (t: Torrent, announcing: Announcing) => {
+  const offerRound = async (t: Torrent, announcing: Announcing, uncounted = 0) => {
     if (seeding(t.view) || !announcing.tracker.connected) return
     const others = (announcing.seeders ?? 0) + (announcing.leechers ?? 0) - 1
-    const count = Math.min(OFFERS_PER_ANNOUNCE, room(t), others - t.conns.size)
+    const count = Math.min(OFFERS_PER_ANNOUNCE, room(t), others - t.conns.size + uncounted)
     if (count < 1) return
     announcing.offersDue = false
     const made = await Promise.all(Array.from({ length: count }, () => offer(t, announcing.tracker.url)))
@@ -707,9 +707,11 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       }
       if (t.askAt && now >= t.askAt) {
         t.askAt = 0
-        // what was offered meanwhile went to remotes that left it alone, and would count against the round
-        for (const conn of t.conns) if (conn.state === 'offered') drop(conn)
-        for (const announcing of t.announcing.values()) void offerRound(t, announcing)
+        // What was offered meanwhile may have gone to a remote that still left it alone, so it does not count
+        // against the round. It waits out its 50 s all the same: an answer to it may be on its way.
+        let offered = 0
+        for (const conn of t.conns) if (conn.state === 'offered') offered++
+        for (const announcing of t.announcing.values()) void offerRound(t, announcing, offered)
       }
       if (relay && now >= t.lookAt) void look(t)
     }

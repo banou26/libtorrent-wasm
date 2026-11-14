@@ -586,10 +586,11 @@ once more, and each remote keeps its end of the old connection until its own sta
 - **A download that loses a channel asks again once its remote will answer.** Each end leaves the other's id
   alone for 60 s after a channel closes, and the next announce can come anywhere in that minute, its offers
   unanswered. So when an open channel closes, its remote not one left alone for its silence (below), its torrent
-  closes the offers nobody answered and makes new ones 65 s after the close, whatever the tracker's interval. A
-  seed makes none. Two engines through the reference tracker at a 60 s interval, the seed closing the channel:
-  a channel again 65.5 to 66.9 s after the close (7 of 7, fakeRtc and libdatachannel), where it took 116.5 to
-  117.5 s when the close followed an announce (5 of 5) and 87 s when it came 30 s later (2 of 2).
+  makes new offers 65 s after the close, whatever the tracker's interval, at each tracker whose socket is up, and
+  without counting the offers still waiting for an answer. A seed makes none. Two engines through the reference
+  tracker at a 60 s interval, the seed closing the channel: a channel again 65.1 to 66.1 s after the close (7 of
+  7, fakeRtc and libdatachannel), where it took 116.5 to 118.7 s when the close followed an announce (5 of 5) and
+  87.0 to 87.5 s when it came 30 s later (2 of 2).
 - **An empty swarm costs no connection.** The first announce carries no offer; offers follow the count in the
   tracker's reply, and a seeding torrent makes none and only answers.
 - **The first seconds wait for nothing.** The offers go out as soon as the first reply names somebody and their
