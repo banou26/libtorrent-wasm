@@ -88,6 +88,9 @@ const UNANSWERED_MS = 50_000
 const OPENING_MS = 30_000
 const UNDIALLED_MS = 10_000
 const QUIET_AFTER_CLOSE_MS = 60_000
+// The remote leaves our id alone as long from when it saw the close, and forgets it at its next beat: a few seconds
+// more cover that beat and the two ends seeing the close at different times.
+const ASK_AGAIN_MS = QUIET_AFTER_CLOSE_MS + 5000
 // A libtorrent 2.1 peer refuses for as long as it lists our address, which outlasts a session. Each new try
 // costs a connection, and where its silence only shows at libtorrent's handshake timeout a peer slot for 11 s.
 const QUIET_AFTER_SILENCE_MS = 600_000
@@ -230,6 +233,8 @@ type Torrent = Memory & {
   lastPeerAt: number | null
   /** When its ordinary peers are read next. */
   lookAt: number
+  /** When the remotes of the open channels it lost can be asked again, or 0. */
+  askAt: number
 }
 
 /** The last announce has had neither a reply nor a refusal yet. */
@@ -349,6 +354,8 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       address: silent ? conn.address : undefined,
     })
     trim(t.quiet, MAX_QUIET)
+    // The next announce could come anywhere in the remote's minute, and its offers would go unanswered.
+    if (conn.state === 'open' && !silent) t.askAt = Date.now() + ASK_AGAIN_MS
   }
 
   const remove = (conn: Conn): boolean => {
@@ -641,7 +648,7 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
       for (const [remote, { silent }] of memory.quiet) if (!silent) memory.quiet.delete(remote)
       t = {
         ...memory, peerId: peerId(), handle, view, hash: binaryHash(view.infoHash), announcing: new Map(),
-        conns: new Set(), offers: new Map(), leeching: false, completed: false, lastPeerAt: null, lookAt: 0,
+        conns: new Set(), offers: new Map(), leeching: false, completed: false, lastPeerAt: null, lookAt: 0, askAt: 0,
       }
       torrents.set(handle, t)
       byHash.set(t.hash, t)
@@ -697,6 +704,12 @@ export const webtorrentPeers = (session: SwarmSession, options: WebtorrentPeersO
         if (now < until) continue
         t.quiet.delete(remote)
         if (silent) changed()
+      }
+      if (t.askAt && now >= t.askAt) {
+        t.askAt = 0
+        // what was offered meanwhile went to remotes that left it alone, and would count against the round
+        for (const conn of t.conns) if (conn.state === 'offered') drop(conn)
+        for (const announcing of t.announcing.values()) void offerRound(t, announcing)
       }
       if (relay && now >= t.lookAt) void look(t)
     }

@@ -583,6 +583,13 @@ once more, and each remote keeps its end of the old connection until its own sta
   again is found by its downloads at their next announce. A download that leaves upload mode with its
   metadata in starts again the same way: libtorrent drops every seed of a torrent in upload mode once the
   metadata is in, and dials its own peers again when the mode ends.
+- **A download that loses a channel asks again once its remote will answer.** Each end leaves the other's id
+  alone for 60 s after a channel closes, and the next announce can come anywhere in that minute, its offers
+  unanswered. So when an open channel closes, its remote not one left alone for its silence (below), its torrent
+  closes the offers nobody answered and makes new ones 65 s after the close, whatever the tracker's interval. A
+  seed makes none. Two engines through the reference tracker at a 60 s interval, the seed closing the channel:
+  a channel again 65.5 to 66.9 s after the close (7 of 7, fakeRtc and libdatachannel), where it took 116.5 to
+  117.5 s when the close followed an announce (5 of 5) and 87 s when it came 30 s later (2 of 2).
 - **An empty swarm costs no connection.** The first announce carries no offer; offers follow the count in the
   tracker's reply, and a seeding torrent makes none and only answers.
 - **The first seconds wait for nothing.** The offers go out as soon as the first reply names somebody and their
@@ -648,6 +655,7 @@ once more, and each remote keeps its end of the old connection until its own sta
 | an open channel nothing reads | closed after 10 s |
 | an attempt whose description never comes | given up after 10 s |
 | a remote whose channel closed | not answered for 60 s, or until the torrent starts again |
+| a download's new offers after an open channel closed, its remote not silent | 65 s after the close |
 | a remote whose channel opened and ended before it had sent a byte | not answered, and its answers not taken, for 10 min |
 | remotes a torrent leaves alone at one time | 200, then the oldest is forgotten |
 | with `relay`, a channel whose remote address is or was an ordinary peer of the torrent in this session | closed |
