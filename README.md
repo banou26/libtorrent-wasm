@@ -357,11 +357,16 @@ worker.addEventListener('message', ({ data }) => {
 - **A magnet is announced to the passed trackers before its metadata says whether it is private.** In this
   mode only a WebRTC peer can bring the metadata, and most magnets name `udp` and `http` trackers only. So a
   torrent whose private flag is not known yet is announced to its own `ws` and `wss` trackers and to the
-  passed ones. For that time, which lasts until a peer has sent the metadata, each passed tracker sees its
-  info hash and the address the announce came from.
+  passed ones. For that time each passed tracker sees its info hash and the address the announce came from.
+  That time lasts until a peer has sent the metadata, and for as long as the torrent runs when none does: a
+  libtorrent client that holds a private torrent from its .torrent file sends no metadata, so the magnet of
+  a private torrent whose only peers are such clients stays announced to the passed trackers.
   - **The metadata says it is not private:** nothing changes.
   - **The metadata says it is private:** each passed tracker is told `stopped` for it, once, and hears nothing
-    of it again, however long the torrent runs. That waits for no check of the files. Offers and answers that
+    of it again, however long the torrent runs. The `stopped` carries what the announces before it carried,
+    not the size the metadata brought. It is said when the swarm next reads the session, within a second or
+    at once on `refresh()` ([below](#what-it-reads-from-the-session)), and until then the swarm still acts at
+    the passed trackers as for any magnet. That waits for no check of the files. Offers and answers that
     went through a passed tracker and have not opened a channel yet are closed. A channel that is already open
     stays: it is a peer of the engine's by then, and libtorrent keeps the peers a magnet had when its metadata
     says private. The torrent's own trackers are announced to as before. Nothing remembers the torrent past
@@ -532,8 +537,9 @@ once more, and each remote keeps its end of the old connection until its own sta
   `.local`, and loopback, private, shared and link-local addresses. A browser asks permission before such a socket.
 - **Only running torrents.** One that is paused, queued, in error or removed is told `stopped` and its attempts
   are closed. One that is checking is not started, and one that starts checking while it runs makes and takes
-  no new connection and keeps what it has: the engine checks for a moment when a magnet's metadata arrives,
-  with its peers kept, and closes them itself for a recheck.
+  no new connection and keeps what it has, except what a magnet whose metadata says private had at the passed
+  trackers ([the direct mode](#the-direct-mode)): the engine checks for a moment when a magnet's metadata
+  arrives, with its peers kept, and closes them itself for a recheck.
 - **An empty swarm costs no connection.** The first announce carries no offer; offers follow the count in the
   tracker's reply, and a seeding torrent makes none and only answers.
 - **The first seconds wait for nothing.** The offers go out as soon as the first reply names somebody and their
@@ -660,13 +666,14 @@ need no wasm. The rest use the reference tracker (`bittorrent-tracker`) on a loo
 through `node-datachannel`, and skip themselves when its native module does not load. Two files need what
 `npm run build` makes. `engines.test.mjs` is the direct mode whole, on the built engine: two sessions on
 `offlineHost()`, a swarm over each, a file moved each way through the reference tracker, a magnet that names
-no tracker found through a passed one, a private torrent that no passed tracker hears of, and every ask an
-engine makes of its host counted. `relay.test.mjs` is the relay mode whole, on the built engine and the built
-WebRTC entry: sessions over real loopback sockets with the entry's class under the swarm, a file moved each way,
-one torrent fed by a TCP peer and a WebRTC peer at once, the channels of an address that is or was an ordinary
-peer closed unheard, the entry against libdatachannel, and a relay outage through `tests/rig/rel-outage.mjs`.
-`types/classes.ts` is compiled, never run: the three classes against `rtcLinks` as built. Nothing in them
-reaches a public tracker or a public peer.
+no tracker found through a passed one, a magnet that turns out private and leaves the passed tracker, a
+private torrent that no passed tracker hears of, and every ask an engine makes of its host counted.
+`relay.test.mjs` is the relay mode whole, on the built engine and the built WebRTC entry: sessions over real
+loopback sockets with the entry's class under the swarm, a file moved each way, one torrent fed by a TCP peer
+and a WebRTC peer at once, the channels of an address that is or was an ordinary peer closed unheard, the
+entry against libdatachannel, and a relay outage through `tests/rig/rel-outage.mjs`. `types/classes.ts` is
+compiled, never run: the three classes against `rtcLinks` as built. Nothing in them reaches a public tracker
+or a public peer.
 
 ## Building
 
