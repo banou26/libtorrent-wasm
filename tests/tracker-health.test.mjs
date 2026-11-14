@@ -13,6 +13,7 @@ import { waitFor } from './rig/peer-handshake.mjs'
 import { startEngine, teardown, tempDir } from './rig/stream-engine.mjs'
 
 const REASON = 'refused for this test'
+const REFUSAL = `d14:failure reason${REASON.length}:${REASON}e`
 const ANSWER = 'd8:intervali1800e5:peers0:e'
 
 const v1 = () => `xt=urn:btih:${crypto.randomBytes(20).toString('hex')}`
@@ -26,7 +27,7 @@ const KINDS = [
 // libtorrent announces to a loopback http tracker only when its path is exactly /announce
 const httpTracker = (defer, body) => new Promise((resolve) => {
   const tracker = { asked: 0 }
-  const server = http.createServer((req, res) => { tracker.asked++; res.end(body) })
+  const server = http.createServer((req, res) => { tracker.asked++; res.end(typeof body === 'function' ? body(req) : body) })
   defer(() => { server.closeAllConnections(); server.close() })
   server.listen(0, '127.0.0.1', () => resolve(Object.assign(tracker, { url: `http://127.0.0.1:${server.address().port}/announce` })))
 })
@@ -47,11 +48,28 @@ const closedPort = () => new Promise((resolve) => {
   })
 })
 
+// the tracker rows once `settled` holds for them, or the last ones read after 10 s
+const rowsWhen = async (session, handle, settled) => {
+  const deadline = Date.now() + 10_000
+  let rows = await session.trackers(handle)
+  while (!settled(rows) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    rows = await session.trackers(handle)
+  }
+  return rows
+}
+
+// the hash an announce carries, as hex: its info_hash parameter is the 20 raw bytes, escaped
+const infoHashOf = (req) => {
+  const escaped = /[?&]info_hash=([^&]*)/.exec(req.url)[1]
+  return Buffer.from(escaped.replace(/%(..)/g, (_, hex) => String.fromCharCode(parseInt(hex, 16))), 'latin1').toString('hex')
+}
+
 for (const { kind, xt, slots } of KINDS) {
   test(`${kind}: a tracker that fails reads failed with its reason, one that answers reads working`, async (t) => {
     const defer = teardown(t)
     const silent = await silentUdpTracker(defer)
-    const refusing = await httpTracker(defer, `d14:failure reason${REASON.length}:${REASON}e`)
+    const refusing = await httpTracker(defer, REFUSAL)
     const closed = await closedPort()
     const closedUrl = `http://127.0.0.1:${closed}/announce`
     const answering = await httpTracker(defer, ANSWER)
@@ -67,13 +85,7 @@ for (const { kind, xt, slots } of KINDS) {
 
     // reached only once every slot has failed at each tracker before it, the udp one timing out after 10 s
     await waitFor('every slot to reach the answering tracker', () => answering.asked >= slots, 40_000)
-    let rows = []
-    const deadline = Date.now() + 10_000
-    while (Date.now() < deadline) {
-      rows = await session.trackers(handle)
-      if (rows.length === urls.length && rows.every((r) => !r.updating) && rows.find((r) => r.url === answering.url).verified) break
-      await new Promise((resolve) => setTimeout(resolve, 100))
-    }
+    const rows = await rowsWhen(session, handle, (list) => list.length === urls.length && list.every((r) => !r.updating) && list.find((r) => r.url === answering.url).verified)
     const row = (url) => rows.find((r) => r.url === url)
     const shown = JSON.stringify(rows.map(({ url, fails, message, verified }) => ({ url, fails, message, verified })))
     assert.equal(rows.length, urls.length, `the tracker list: ${shown}`)
@@ -91,5 +103,26 @@ for (const { kind, xt, slots } of KINDS) {
 
     assert.equal(unasked.asked, 0)
     assert.equal(row(unasked.url).fails, -1, `a tracker nobody asked reads as asked: ${shown}`)
+  })
+}
+
+// A hybrid announces each of its two hashes on its own, so one tracker can answer one and refuse the other.
+for (const answers of ['v1', 'v2']) {
+  test(`hybrid: a tracker that answers only the ${answers} hash reads working`, async (t) => {
+    const defer = teardown(t)
+    const v1hex = crypto.randomBytes(20).toString('hex')
+    const hashes = new Set()
+    const tracker = await httpTracker(defer, (req) => {
+      const hash = infoHashOf(req)
+      hashes.add(hash)
+      return (hash === v1hex) === (answers === 'v1') ? ANSWER : REFUSAL
+    })
+    const { session, running } = await startEngine(defer, tempDir(defer), { host: countingHost() })
+    const handle = await running(session.addMagnet(`magnet:?xt=urn:btih:${v1hex}&${v2()}&tr=${encodeURIComponent(tracker.url)}`, '/dl'))
+
+    await waitFor('both hashes to be announced', () => hashes.size === 2, 20_000)
+    const [row] = await rowsWhen(session, handle, ([r]) => r && !r.updating)
+    assert.equal(row.fails, 0, `answered the ${answers} hash and reads ${row.fails} failures: ${row.message}`)
+    assert.equal(row.verified, true)
   })
 }
