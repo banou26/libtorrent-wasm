@@ -1,20 +1,24 @@
 // A peer that dials the engine and speaks the wire protocol by hand, with the fast extension
 // (BEP 6) and lt_donthave (BEP 54), so a test sees every message the engine sends it. Given a
 // `socket` (one end of a stream the engine holds the other end of) it speaks over that instead.
+// Given `metadata` it serves that too (BEP 9).
 
 import crypto from 'node:crypto'
 import net from 'node:net'
 
-import { bdecode } from './make-torrent.mjs'
+import { bdecode, bencode } from './make-torrent.mjs'
 import { PROTOCOL } from './peer-handshake.mjs'
 
 const MSG = {
   unchoke: 1, interested: 2, request: 6, piece: 7, haveAll: 14, haveNone: 15, reject: 16, extended: 20,
 }
-// the ids this peer asks the engine to use for the lt_donthave, ut_pex and ut_holepunch messages it sends
+// the ids this peer asks the engine to use for the lt_donthave, ut_pex, ut_holepunch and ut_metadata messages it sends
 const DONT_HAVE_ID = 7
 const PEX_ID = 8
 const HOLEPUNCH_ID = 9
+const METADATA_ID = 10
+// BEP 9
+const METADATA_PIECE = 16 * 1024
 // BEP 55
 const HOLEPUNCH_TYPE = ['rendezvous', 'connect', 'failed']
 /** pex flag (BEP 11 as libtorrent extends it): the named peer supports ut_holepunch. */
@@ -59,22 +63,26 @@ export class ScriptedPeer {
   /** The ids the engine reads ut_pex and ut_holepunch under, null until its extension handshake has arrived. */
   enginePexId = null
   engineHolepunchId = null
+  #engineMetadataId = null
   #socket = null
   #serve
   #reqq
   #listenPort
+  #metadata
 
   /**
    * `reqq` is how many requests this peer says it takes at once, and `listenPort` the port it says
-   * it can be dialled on (both BEP 10), 0 to say nothing.
+   * it can be dialled on (both BEP 10), 0 to say nothing. `metadata` is the bencoded info dictionary:
+   * with it the peer says it holds the metadata, and answers every request for a piece of it.
    */
-  constructor({ infoHash, port, serve = null, socket = null, reqq = 0, listenPort = 0 }) {
+  constructor({ infoHash, port, serve = null, socket = null, reqq = 0, listenPort = 0, metadata = null }) {
     this.infoHash = Buffer.from(infoHash, 'hex')
     this.port = port
     this.#serve = serve
     this.#socket = socket
     this.#reqq = reqq
     this.#listenPort = listenPort
+    this.#metadata = metadata
   }
 
   /**
@@ -108,10 +116,12 @@ export class ScriptedPeer {
           buf = buf.subarray(68)
           shookHands = true
           clearTimeout(late)
-          socket.write(frame(MSG.extended, Buffer.concat([
-            Buffer.from([0]),
-            Buffer.from(`d1:md11:lt_donthavei${DONT_HAVE_ID}e12:ut_holepunchi${HOLEPUNCH_ID}e6:ut_pexi${PEX_ID}ee${this.#listenPort ? `1:pi${this.#listenPort}e` : ''}${this.#reqq ? `4:reqqi${this.#reqq}e` : ''}e`),
-          ])))
+          socket.write(frame(MSG.extended, Buffer.concat([Buffer.from([0]), bencode({
+            m: { lt_donthave: DONT_HAVE_ID, ut_holepunch: HOLEPUNCH_ID, ut_pex: PEX_ID, ut_metadata: this.#metadata ? METADATA_ID : undefined },
+            metadata_size: this.#metadata?.length,
+            p: this.#listenPort || undefined,
+            reqq: this.#reqq || undefined,
+          })])))
           if (this.#serve) socket.write(Buffer.concat([frame(MSG.haveAll), frame(MSG.unchoke)]))
           else socket.write(Buffer.concat([frame(MSG.haveNone), frame(MSG.interested)]))
           resolve()
@@ -170,6 +180,16 @@ export class ScriptedPeer {
       const { m } = bdecode(payload.subarray(1))
       this.enginePexId = m?.ut_pex ?? null
       this.engineHolepunchId = m?.ut_holepunch ?? null
+      this.#engineMetadataId = m?.ut_metadata ?? null
+    } else if (id === MSG.extended && payload[0] === METADATA_ID) {
+      // msg_type 0 asks for a piece and 1 carries one, its bytes after the dictionary
+      const { msg_type: type, piece } = bdecode(payload.subarray(1))
+      if (type !== 0) return
+      this.#socket.write(frame(MSG.extended, Buffer.concat([
+        Buffer.from([this.#engineMetadataId]),
+        bencode({ msg_type: 1, piece, total_size: this.#metadata.length }),
+        this.#metadata.subarray(piece * METADATA_PIECE, (piece + 1) * METADATA_PIECE),
+      ])))
     } else if (id === MSG.extended && payload[0] === DONT_HAVE_ID) {
       this.dontHave.push(payload.readUInt32BE(1))
     } else if (id === MSG.extended && payload[0] === PEX_ID) {

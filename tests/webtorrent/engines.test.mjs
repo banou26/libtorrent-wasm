@@ -11,11 +11,12 @@ import test, { after } from 'node:test'
 
 import { PRIORITY, offlineHost } from '../../build/index.js'
 import { rtcLinks, webtorrentPeers } from '../../build/webtorrent/index.js'
-import { bencode, magnetFor, makeTorrent } from '../rig/make-torrent.mjs'
+import { bdecode, bencode, magnetFor, makeTorrent } from '../rig/make-torrent.mjs'
 import { waitFor } from '../rig/peer-handshake.mjs'
+import { ScriptedPeer } from '../rig/scripted-peer.mjs'
 import { MiB, fixture, savedSha256, startEngine, teardown, tempDir } from '../rig/stream-engine.mjs'
 import { TRACKER, download, finished, routedWebSocket, seed, swarmOver } from './engine-swarm.mjs'
-import { fakeRtc, nativeRtc, referenceTracker, releaseNativeRtc } from './fakes.mjs'
+import { FakeSession, fakeRtc, nativeRtc, referenceTracker, releaseNativeRtc } from './fakes.mjs'
 
 after(releaseNativeRtc)
 
@@ -186,6 +187,53 @@ test('a torrent that is private when it is added, from its file or from resume d
   peers.refresh()
   await taken(b.session.addTorrentWithResume(resume, '/dl'))
   assert.deepEqual(asked, [])
+})
+
+test('a magnet whose metadata says it is private leaves the tracker the caller passed, told no size, and keeps the peer it found there', async (t) => {
+  const defer = teardown(t)
+  const reference = await referenceTracker(t)
+  if (!reference) return t.skip('bittorrent-tracker is not installed')
+  Routed = routedWebSocket(reference.url)
+  const links = rtcLinks({ RTCPeerConnection: fakeRtc(), iceServers: [] })
+  const fx = fixture(defer, MiB)
+  const marked = makeTorrent({ file: path.join(fx.root, 'fixture.bin'), pieceLength: 256 * 1024, private: true })
+
+  // An engine that holds a private torrent from its file serves no metadata, so two of ours cannot play this.
+  // The peer is another client at the same tracker: it holds the metadata, serves it, and has no piece.
+  const holder = new FakeSession()
+  const shaken = []
+  holder.addPeerStream = (_, socket) => {
+    shaken.push(new ScriptedPeer({ infoHash: marked.infoHash, socket, metadata: bencode(bdecode(marked.torrent).info) }).connect())
+  }
+  holder.add(1, { infoHash: marked.infoHash, left: 0 })
+  const holding = webtorrentPeers(holder, { links, WebSocket: Routed, trackers: [TRACKER] })
+  defer(() => holding.close())
+  await waitFor('the tracker to list the holder', () => holding.snapshot().torrents[0]?.trackers[0]?.seeders === 1)
+
+  // every announce the engine's swarm sends
+  const sent = []
+  class Recorded extends Routed {
+    send(data) {
+      const { event, left, offers } = JSON.parse(data)
+      sent.push([event, left, offers?.length])
+      super.send(data)
+    }
+  }
+  const b = await startEngine(defer, path.join(fx.root, 'b'))
+  const peers = webtorrentPeers(b.session, { links, WebSocket: Recorded, trackers: [TRACKER] })
+  defer(() => peers.close())
+  const handle = await b.running(b.session.addMagnet(magnetFor(marked.infoHash, marked.name), '/dl'))
+  assert.deepEqual([b.session.webSocketTrackers(handle), b.session.isPrivate(handle)], [[], undefined])
+  await waitFor('the metadata to say private', () => b.session.isPrivate(handle) === true)
+  await Promise.all(shaken)
+  await waitFor('the passed tracker to be told', () => sent.at(-1)[0] === 'stopped')
+  // two more of the swarm's reads
+  await new Promise((resolve) => setTimeout(resolve, 2500))
+  assert.deepEqual(sent, [['started', 16 * 1024, 0], [undefined, 16 * 1024, 1], ['stopped', 16 * 1024, 0]])
+  const [{ trackers, open }] = peers.snapshot().torrents
+  assert.deepEqual(trackers, [])
+  assert.equal(open, 1, 'the swarm closed the channel that was open')
+  assert.equal((await b.session.peers(handle)).length, 1, 'the engine let go of the peer that brought the metadata')
 })
 
 test('a download whose session reports a check as its metadata arrives keeps the channel that brought it', async (t) => {
