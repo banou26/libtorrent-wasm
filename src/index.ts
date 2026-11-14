@@ -1752,6 +1752,7 @@ export class Session {
     this.resumeWaiters = []
     this.deadlineRefs.clear()
     this.priosByHandle.clear()
+    this.handles.clear()
     for (const address of [...this.streams.keys()]) this.dropStream(address, 'the session was destroyed')
     // After the session is gone, because closing the tick channel first would strand any work
     // _lt_session_destroy still wants to schedule. The shim publishes itself as Module.__FKN
