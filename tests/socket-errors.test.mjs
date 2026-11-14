@@ -1,6 +1,6 @@
 // What libtorrent reads when a host's tcp socket fails. A host gives Node's errors, whose errno is
-// Node's own (negative, Linux numbering), and the shim answers in Emscripten's (WASI) numbers, so a
-// reset passed through as -104 was read back by recv as 104 bytes received.
+// Node's own (negative, Linux numbering), and the shim answers in Emscripten's (WASI) numbers: a
+// reset passed through as -104 would read back from recv as 104 bytes received.
 
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
@@ -93,6 +93,7 @@ for (const [code, errno, wasi] of [
 
 for (const [what, error] of [
   ['no code', new Error('Connection reset by peer')],
+  ['an errno and no code', nodeError('read ECONNRESET', { errno: -104 })],
   ['a code the shim does not know', nodeError('getaddrinfo ENOTFOUND example.org', { code: 'ENOTFOUND', errno: -3008 })],
 ]) {
   test(`an error with ${what} reads as a reset`, (t) => {
