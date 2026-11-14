@@ -10,8 +10,6 @@ import { EventEmitter } from 'node:events'
 import dgram from 'node:dgram'
 import net from 'node:net'
 
-import { normalizeErrno } from './node-host.mjs'
-
 const LOOPBACK = '127.0.0.1'
 const REFUSED_AFTER_MS = 30
 const loopback = (address) => typeof address === 'string' && address.startsWith('127.')
@@ -58,7 +56,6 @@ export const createRelayHost = () => {
         this.emit('listening')
       })
       real.on('error', (err) => {
-        normalizeErrno(err)
         if (this.bound || this.real !== real) return
         this.real = null
         try { real.close() } catch {}
@@ -114,7 +111,6 @@ export const createRelayHost = () => {
         this.emit('listening')
       })
       real.on('error', (err) => {
-        normalizeErrno(err)
         if (this.bound || this.real !== real) return
         this.real = null
         this.emit('error', err)
@@ -134,7 +130,8 @@ export const createRelayHost = () => {
   }
 
   const track = (sock) => {
-    sock.on('error', normalizeErrno)
+    // an accepted socket has no listener of the shim's until accept(), and an 'error' with none throws
+    sock.on('error', () => {})
     const entry = () => { open.delete(entry); sock.destroy(new Error('WebVPN session closed')) }
     open.add(entry)
     sock.once('close', () => open.delete(entry))
