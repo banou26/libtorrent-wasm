@@ -88,7 +88,11 @@ jobs:
       # runner they measure the machine as much as the engine: they pass here and failed on the first
       # CI run. tests/forget-pieces-swarm.test.mjs stays local too: it needs transmission seeders,
       # which this runner does not have.
+      # On Node 24 a limit holds each test, not a whole file, so a file that finishes its tests and
+      # never exits is ended by nothing: the step's own limit turns that into a failure in 20 minutes
+      # (the suite takes about 2 on a desktop) instead of the job's 60.
       - run: npm run test:ci
+        timeout-minutes: 20
 
       # ubuntu-24 refuses Chrome's sandbox to an unprivileged user namespace (AppArmor). Lifted for
       # the run, rather than launching Chrome without its sandbox.
@@ -98,6 +102,7 @@ jobs:
       # the runner's Chrome. With CHROME_BIN set, a Chrome that is missing or does not launch fails
       # the browser tests; without it they would be skipped.
       - run: npm run test:webrtc
+        timeout-minutes: 20
         env:
           CHROME_BIN: /usr/bin/google-chrome
 
