@@ -15,7 +15,8 @@ export interface LtModule {
   _lt_set_dht(on: number): void
   _lt_set_listen_port(port: number): void
   _lt_session_create(): number
-  _lt_session_destroy(): void
+  /** 1, ending nothing, when called from inside _lt_session_tick. */
+  _lt_session_destroy(): number
   _lt_session_tick(): void
   _lt_session_pump_alerts(): void
 

@@ -1735,6 +1735,11 @@ export class Session {
     }
   }
 
+  /**
+   * Ends the session within the call. Asked from inside the engine's tick, from a storage method or a
+   * host hook the tick called, it ends the session once that tick has returned, before anything else
+   * runs, since the tick goes on using the session after the call.
+   */
   destroy() {
     if (this.destroyed) return
     this.destroyed = true
@@ -1748,11 +1753,13 @@ export class Session {
     this.deadlineRefs.clear()
     this.priosByHandle.clear()
     for (const address of [...this.streams.keys()]) this.dropStream(address, 'the session was destroyed')
-    this.mod._lt_session_destroy()
     // After the session is gone, because closing the tick channel first would strand any work
     // _lt_session_destroy still wants to schedule. The shim publishes itself as Module.__FKN
     // (library_fkn.js:182); the optional chain covers a module that never reached init().
-    ;(this.mod as unknown as { __FKN?: { teardown?: () => void } }).__FKN?.teardown?.()
+    const teardown = () => (this.mod as unknown as { __FKN?: { teardown?: () => void } }).__FKN?.teardown?.()
+    // a microtask runs only once the tick, and every call it made, has returned
+    if (!this.mod._lt_session_destroy()) teardown()
+    else queueMicrotask(() => { this.mod._lt_session_destroy(); teardown() })
   }
 }
 

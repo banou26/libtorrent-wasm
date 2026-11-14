@@ -230,6 +230,12 @@ does nothing. A `read()` or a `saveResumeData()` still waiting is rejected. A
 session made after it with `createSession`, in the same worker, works as the
 first one did.
 
+Asked from inside a call the engine makes from its tick, a storage method or a
+host socket hook, `destroy()` ends the session once that tick has returned,
+before anything else runs. The tick goes on using the session after the call,
+and a session ended under it crashed the engine (`memory access out of
+bounds`).
+
 What libtorrent would go on to wait for is dropped: a uTP socket's resends, a
 peer's bandwidth quota, and the `stopped` announce to each HTTP tracker the
 torrent announced to, whose connection is dialled and closed before a byte is

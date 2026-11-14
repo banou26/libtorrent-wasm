@@ -747,8 +747,13 @@ LT_API int lt_session_create() {
   return 0;
 }
 
-LT_API void lt_session_destroy() {
-  if (!g_session) return;
+static bool g_in_tick = false;
+
+// 1, ending nothing, when called from inside lt_session_tick() through a JS call the tick made (a
+// storage method, for one): the tick reads the session again once that call returns.
+LT_API int lt_session_destroy() {
+  if (!g_session) return 0;
+  if (g_in_tick) return 1;
   g_session->handles.clear();
   // libtorrent's order for a session on an io_context it does not own (session.hpp) is abort, free the
   // session, run the io_context until nothing is pending, free the proxy. What the abort leaves pending
@@ -768,6 +773,7 @@ LT_API void lt_session_destroy() {
   g_pending_alerts.data.clear();
   delete g_session;
   g_session = nullptr;
+  return 0;
 }
 
 static std::int64_t g_tick_count = 0;
@@ -872,6 +878,7 @@ LT_API int lt_diag_parse_interfaces(char const* str) {
 
 LT_API int lt_session_tick() {
   if (!g_session) return 0;
+  g_in_tick = true;
   // without the guard poll() returns without servicing the select-reactor on Emscripten, wedging inbound UDP
   static auto work_guard = boost::asio::make_work_guard(g_session->ioc->get_executor());
   std::size_t ran = 0;
@@ -921,6 +928,7 @@ LT_API int lt_session_tick() {
     g_pending_alerts.put_bytes(m.data(), m.size());
   }
   g_session->ioc->restart();
+  g_in_tick = false;
   return static_cast<int>(ran);
 }
 
