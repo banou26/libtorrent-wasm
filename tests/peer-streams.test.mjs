@@ -91,7 +91,8 @@ test('a session with a stream peer and a loopback tcp peer never hands its host 
   for (const r of tcpSeed.requests.slice()) tcpSeed.send(r.piece, r.offset, block(r.piece, r.offset, r.length))
   await waitFor('the download', () => done(session, handle), 60_000)
   assert.equal(savedSha256(leech, handle), fx.sha256)
-  assert.ok(b.received > MiB, `the stream peer delivered ${b.received} bytes`)
+  // a share, not a size: the tcp peer answers at once and takes most of the file
+  assert.ok(b.received >= fx.meta.pieceLength, `the stream peer delivered ${b.received} bytes`)
 
   // libtorrent tries the stale address over uTP first, then dials it
   await waitFor('the dial of the stale address', () => asked.includes(STALE), 30_000)

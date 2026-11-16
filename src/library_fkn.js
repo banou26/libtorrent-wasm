@@ -32,25 +32,21 @@ addToLibrary({
     freeFds: null,
 
     pendingTick: false,
-    // a MessageChannel post has no 4ms setTimeout-min-delay floor and doesn't starve macrotasks the way self-rearming queueMicrotask does
+    // A MessageChannel post has no 4ms setTimeout-min-delay floor and doesn't starve macrotasks the way
+    // self-rearming queueMicrotask does. Never a timer: a 16 ms wait after a tick that found nothing to do
+    // held every receive burst back, and capped a download from 4 local seeders at about 10 MB/s.
     scheduleTick() {
       FKN.stats.schedule++
-      if (FKN.pendingTick) return
+      // a socket event can land after teardown, with no session left to tick
+      if (FKN.pendingTick || !FKN._mc) return
       FKN.pendingTick = true
-      if (FKN.tickIdle) {
-        setTimeout(FKN._doTick, 16)
-      } else {
-        FKN._mc.port2.postMessage(null)
-      }
+      FKN._mc.port2.postMessage(null)
     },
-    tickIdle: true,
     _doTick() {
       FKN.pendingTick = false
       if (!Module._lt_session_tick) return
       FKN.stats.tick++
-      const ran = Module._lt_session_tick()
-      FKN.tickIdle = (ran === 0)
-      if (ran > 0) FKN.scheduleTick()
+      if (Module._lt_session_tick() > 0) FKN.scheduleTick()
     },
     _mcInit() {
       if (FKN._mc) return
@@ -77,7 +73,6 @@ addToLibrary({
         FKN._mc = null
       }
       FKN.pendingTick = false
-      FKN.tickIdle = true
       // closeFd deletes as it goes, so iterate a copy
       for (const fd of [...FKN.fds.keys()]) FKN.closeFd(fd)
       FKN.initialized = false

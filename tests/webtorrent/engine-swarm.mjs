@@ -9,7 +9,7 @@ import { TORRENT_STATE } from '../../build/index.js'
 import { webtorrentPeers } from '../../build/webtorrent/index.js'
 import { bdecode, bencode, magnetFor } from '../rig/make-torrent.mjs'
 import { waitFor } from '../rig/peer-handshake.mjs'
-import { done } from '../rig/stream-engine.mjs'
+import { MiB, done } from '../rig/stream-engine.mjs'
 
 // The name every torrent gives its tracker. The swarm opens no socket to a loopback name a torrent gives,
 // so `routedWebSocket` is a network on which this public name is the reference tracker.
@@ -90,9 +90,13 @@ export const magnetOf = (fx) => `${magnetFor(fx.meta.infoHash, fx.meta.name)}&tr
  */
 export const finished = async (to, handle, ms) => {
   const delivered = {}
+  // held back until a peer list has named a peer: over a pipe the whole file can come, and its seed go,
+  // between two lists, which arrive once per alert pump
+  to.session.setDownloadLimit(handle, MiB)
   await waitFor('the download', () => {
     void to.session.peers(handle)
     for (const peer of to.session.lastPeers(handle)) delivered[peer.transport] = Math.max(delivered[peer.transport] ?? 0, peer.totalDownload)
+    if (Object.keys(delivered).length) to.session.setDownloadLimit(handle, 0)
     return done(to.session, handle)
   }, ms)
   return { handle, carriedBy: Object.keys(delivered), delivered }
