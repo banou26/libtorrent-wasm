@@ -106,7 +106,7 @@ endif()
 target_compile_definitions(libtorrent PRIVATE ${LT_DEFS})
 
 target_compile_options(libtorrent PRIVATE
-  -O3 -fexceptions
+  -O3 -fwasm-exceptions
   -Wno-deprecated-declarations
 )
 
@@ -151,8 +151,8 @@ set(EM_LINK_FLAGS
 
   # Our JS library: socket syscalls + disk bridge.
   "--js-library=${CMAKE_CURRENT_SOURCE_DIR}/src/library_fkn.js"
-  "-sNO_DISABLE_EXCEPTION_CATCHING"
-  "-fexceptions"
+  # the wasm exception instructions: no JS invoke_* wrapper around every call that can throw
+  "-fwasm-exceptions"
 )
 
 if (DEBUG_NAMES)
