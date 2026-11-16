@@ -821,6 +821,52 @@ export class Session {
   /** The last tracker list received, without asking for a new one. */
   lastTrackers(handle: number): TrackerInfo[] { return this.trackersByHandle.get(handle) ?? [] }
 
+  /**
+   * Add trackers to a torrent, running or not, as an add takes them from a magnet or a .torrent.
+   * An http, https or udp one joins {@link trackers} after the torrent's own, and libtorrent
+   * announces to it while none before it works. A ws or wss one joins {@link webSocketTrackers}.
+   * A tracker the torrent already has changes nothing.
+   *
+   * Answers the urls it did not take: any that is not an http, https, udp, ws or wss url, and every
+   * url for a handle the engine never gave out.
+   */
+  addTrackers(handle: number, urls: Iterable<string>): string[] {
+    const m = this.mod
+    const refused: string[] = []
+    for (const url of urls) {
+      const ptr = m.stringToNewUTF8(url.trim())
+      try {
+        if (m._lt_torrent_add_tracker(handle, ptr) !== 0) refused.push(url)
+      } finally {
+        m._free(ptr)
+      }
+    }
+    return refused
+  }
+
+  /**
+   * How many connected peers have each piece, one entry a piece, for an availability bar. Read from
+   * the engine on the call. Null before {@link files} answers, and empty while libtorrent keeps no
+   * count: for a torrent that has every piece, or one still checking its files.
+   */
+  pieceAvailability(handle: number): Uint16Array | null {
+    const layout = this.filesByHandle.get(handle)
+    if (!layout) return null
+    const m = this.mod
+    const ptr = m._malloc(layout.numPieces * 2)
+    try {
+      const n = m._lt_torrent_piece_availability(handle, ptr, layout.numPieces)
+      return n < 0 ? null : new Uint16Array(m.HEAPU8.buffer, ptr, n).slice()
+    } finally {
+      m._free(ptr)
+    }
+  }
+
+  /** How many nodes the DHT knows, 0 while it is off. Cheap enough to read every second. */
+  dhtNodes(): number {
+    return this.destroyed ? 0 : this.mod._lt_session_dht_nodes()
+  }
+
   private awaitList<T>(
     waiters: ListWaiter<T>[], cache: Map<number, T[]>, handle: number, timeoutMs: number,
   ): Promise<T[]> {

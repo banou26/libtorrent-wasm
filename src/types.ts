@@ -42,6 +42,9 @@ export interface LtModule {
   _lt_torrent_post_status(handle: number): number
   _lt_torrent_post_peers(handle: number): number
   _lt_torrent_post_trackers(handle: number): number
+  _lt_torrent_add_tracker(handle: number, url: number): number
+  _lt_torrent_piece_availability(handle: number, out: number, count: number): number
+  _lt_session_dht_nodes(): number
   _lt_torrent_infohash(handle: number, out: number): number
   _lt_torrent_infohash_v2(handle: number, out: number): number
   _lt_torrent_private(handle: number): number

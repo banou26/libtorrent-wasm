@@ -52,6 +52,10 @@ extern "C" int __syscall_setsockopt(int /*fd*/, int /*level*/, int /*optname*/,
 #include "libtorrent/bdecode.hpp"
 #include "libtorrent/bencode.hpp"
 #include "libtorrent/string_util.hpp"
+#include "libtorrent/announce_entry.hpp"
+#include "libtorrent/parse_url.hpp"
+#include "libtorrent/performance_counters.hpp"
+#include "libtorrent/kademlia/dht_tracker.hpp"
 #include <boost/asio/post.hpp>
 
 #include "disk_io.hpp"
@@ -1133,6 +1137,54 @@ LT_API int lt_torrent_post_peers(std::uint32_t id) {
 // see lt_torrent_post_peers: h->trackers() is a sync_call and would deadlock the same way
 LT_API int lt_torrent_post_trackers(std::uint32_t id) {
   return on_torrent(id, [](lt::torrent_handle const& h) { h.post_trackers(); });
+}
+
+// One tracker for a torrent, running or not, taken as an add takes one from a magnet or a .torrent:
+// an http, https or udp url goes to libtorrent at tier 0, after the torrent's own, and a ws or wss
+// one joins the list lt_torrent_ws_trackers keeps. A url the torrent already has changes nothing.
+// -1 for an id no add gave out, -2 for a url that is none of those.
+LT_API int lt_torrent_add_tracker(std::uint32_t id, char const* url) {
+  if (!g_session || !url || !key_of(id)) return -1;
+  std::string const u = url;
+  if (is_ws_tracker(u)) {
+    keep_ws_tracker(id, u);
+    return 0;
+  }
+  if (!lt::is_valid_tracker_url(u)) return -2;
+  return on_torrent(id, [u](lt::torrent_handle const& h) { h.add_tracker(lt::announce_entry(u)); });
+}
+
+// How many connected peers have each piece, one uint16 a piece (65535 at most) into `out`, for up to
+// `count` pieces. Answers how many it wrote: 0 when libtorrent keeps no count, which is for a torrent
+// with every piece (it drops its picker) or one still checking, and -1 before the torrent-ready
+// record. Reads the torrent itself, between ticks: torrent_handle::piece_availability() is a
+// sync_call and would never return.
+LT_API int lt_torrent_piece_availability(std::uint32_t id, std::uint16_t* out, std::uint32_t count) {
+  if (!g_session || !out || !geometry_for(id)) return -1;
+  auto* h = lookup_handle(id);
+  if (!h || !h->is_valid()) return -1;
+  auto t = h->native_handle();
+  if (!t) return -1;
+  lt::aux::vector<int, lt::piece_index_t> avail;
+  t->piece_availability(avail);
+  std::uint32_t n = 0;
+  for (int const a : avail) {
+    if (n == count) break;
+    out[n++] = static_cast<std::uint16_t>(std::min(a, 0xFFFF));
+  }
+  return static_cast<int>(n);
+}
+
+// The DHT's node count, every listen socket's routing table summed: the figure a torrent client
+// shows. 0 while the DHT is off. Counted here rather than read from the session's counters, which
+// only post_session_stats refreshes.
+LT_API int lt_session_dht_nodes() {
+  if (!g_session) return 0;
+  auto const* dht = g_session->ses->native_handle()->dht();
+  if (!dht) return 0;
+  lt::counters c;
+  dht->update_stats_counters(c);
+  return static_cast<int>(c[lt::counters::dht_nodes]);
 }
 
 /**
