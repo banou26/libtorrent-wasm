@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Every run compiles the engine from source before a single test can import it: the emsdk
     # image, boost 1.84 headers, then ~160 translation units. 46s on a 16 core desktop.
     timeout-minutes: 60
@@ -119,7 +119,7 @@ jobs:
     # a pull request builds and tests, and publishes nothing
     if: github.event_name != 'pull_request'
     # npm refuses trusted publishing from a self-hosted runner
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       # the OIDC token npm exchanges for short-lived publish credentials
