@@ -273,6 +273,25 @@ test('a magnet that names no tracker finds its seed through a tracker the caller
   assert.deepEqual(peers.snapshot().torrents[0].trackers.map((tracker) => [tracker.url, tracker.connected, tracker.failure]), [[TRACKER, true, null]])
 })
 
+test('a tracker added to a running magnet that names none is announced to by its running swarm, and its seed is used', async (t) => {
+  const defer = teardown(t)
+  const reference = await referenceTracker(t)
+  if (!reference) return t.skip('bittorrent-tracker is not installed')
+  Routed = routedWebSocket(reference.url)
+  const RTCPeerConnection = fakeRtc()
+  const there = fixture(defer, 2 * MiB)
+  const a = await side(defer, path.join(there.root, 'a'), RTCPeerConnection)
+  await seed(a, there, 'there')
+
+  const b = await side(defer, path.join(there.root, 'b'), RTCPeerConnection)
+  const handle = await b.running(b.session.addMagnet(magnetFor(there.meta.infoHash, there.meta.name), '/there'))
+  await waitFor('the swarm to take the magnet', () => b.of(handle))
+  assert.deepEqual(b.of(handle).trackers, [])
+  assert.deepEqual(b.session.addTrackers(handle, [TRACKER]), [])
+  await finished(b, handle, 20_000)
+  assert.equal(savedSha256(b, handle), there.sha256)
+})
+
 test('a torrent that is private when it is added, from its file or from resume data, is never announced to a tracker the caller passed', async (t) => {
   const defer = teardown(t)
   const fx = fixture(defer, MiB)
