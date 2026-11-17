@@ -114,11 +114,10 @@ test('the DHT node count is 0 without a DHT and moves once a node is known', asy
   assert.equal(seed.session.dhtNodes(), 0)
   assert.equal(leech.session.dhtNodes(), 0)
 
-  // each peer tells the other its DHT port in the handshake, and the DHT pings it
+  // each peer tells the other its DHT port in the handshake, and the DHT pings it. The seed first keeps
+  // the leech in its replacement cache, which is not a node yet, for about 3 s.
   const handle = await leech.running(leech.session.addTorrentFile(fx.meta.torrent, '/dl'))
   dialTcp(leech.session, handle, '127.0.0.1', seed.session.reachable().port)
-  await waitFor('a DHT node on either side', () => seed.session.dhtNodes() + leech.session.dhtNodes() > 0)
-  assert.ok(seed.session.dhtNodes() <= 1 && leech.session.dhtNodes() <= 1,
-    `more nodes than engines: ${seed.session.dhtNodes()} and ${leech.session.dhtNodes()}`)
+  await waitFor('one DHT node on each side', () => seed.session.dhtNodes() === 1 && leech.session.dhtNodes() === 1)
   assert.equal(off.session.dhtNodes(), 0)
 })
