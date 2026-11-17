@@ -1140,8 +1140,9 @@ LT_API int lt_torrent_post_trackers(std::uint32_t id) {
 }
 
 // One tracker for a torrent, running or not, taken as an add takes one from a magnet or a .torrent:
-// an http, https or udp url goes to libtorrent at tier 0, after the torrent's own, and a ws or wss
-// one joins the list lt_torrent_ws_trackers keeps. A url the torrent already has changes nothing.
+// an http, https or udp url goes to libtorrent at tier 0, so at the end of the first tier (a magnet
+// gives each tracker a tier of its own), and a ws or wss one joins the list lt_torrent_ws_trackers
+// keeps. A url the torrent already has changes nothing.
 // -1 for an id no add gave out, -2 for a url that is none of those.
 // A ws url is kept on the io_context, behind a remove asked before it, and not while a remove asked
 // after it is pending: a re-add of the torrent gets the same id, and would inherit the url.
