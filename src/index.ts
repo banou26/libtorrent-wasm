@@ -831,7 +831,7 @@ export class Session {
    * Answers the urls it did not take: any that is not an http, https, udp, ws or wss url, and every
    * url for a handle the engine never gave out. A removed torrent takes them and keeps none.
    */
-  addTrackers(handle: number, urls: Iterable<string>): string[] {
+  addTrackers(handle: number, urls: readonly string[]): string[] {
     const m = this.mod
     const refused: string[] = []
     for (const url of urls) {

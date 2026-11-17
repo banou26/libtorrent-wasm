@@ -3,9 +3,11 @@
 // tracker on this machine, and a host that lets nothing else out and looks no name up.
 
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import http from 'node:http'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { countingHost } from './rig/counting-host.mjs'
 import { waitFor } from './rig/peer-handshake.mjs'
@@ -142,4 +144,10 @@ test('the DHT node count is 0 without a DHT and moves once a node is known', asy
   assert.equal(off.session.dhtNodes(), 0)
   seed.session.destroy()
   assert.equal(seed.session.dhtNodes(), 0)
+})
+
+test('addTrackers takes a list, so a url passed alone fails to compile rather than going in a character at a time', () => {
+  const at = (relative) => fileURLToPath(new URL(relative, import.meta.url))
+  const { status, stdout, stderr } = spawnSync(at('../node_modules/.bin/tsc'), ['-p', at('./types')], { encoding: 'utf8' })
+  assert.equal(status, 0, stdout + stderr)
 })
