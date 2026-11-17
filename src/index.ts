@@ -865,7 +865,7 @@ export class Session {
 
   /** How many nodes the DHT knows, 0 while it is off. Cheap enough to read every second. */
   dhtNodes(): number {
-    return this.destroyed ? 0 : this.mod._lt_session_dht_nodes()
+    return this.mod._lt_session_dht_nodes()
   }
 
   private awaitList<T>(

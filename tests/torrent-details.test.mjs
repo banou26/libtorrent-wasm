@@ -140,4 +140,6 @@ test('the DHT node count is 0 without a DHT and moves once a node is known', asy
   dialTcp(leech.session, handle, '127.0.0.1', seed.session.reachable().port)
   await waitFor('one DHT node on each side', () => seed.session.dhtNodes() === 1 && leech.session.dhtNodes() === 1)
   assert.equal(off.session.dhtNodes(), 0)
+  seed.session.destroy()
+  assert.equal(seed.session.dhtNodes(), 0)
 })
