@@ -15,6 +15,9 @@ on:
   # re-runs a publish that failed after the version already landed, which a push cannot repeat
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: publish
   cancel-in-progress: false
@@ -26,15 +29,16 @@ jobs:
     # image, boost 1.84 headers, then ~160 translation units. 46s on a 16 core desktop.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           # `make dist` applies patches/*.patch onto the libtorrent submodule, so it has to be here.
           submodules: recursive
 
       # 24 or later. Node 22 holds a whole test FILE to --test-timeout, where 24 holds each test to it,
       # and four files of the suite run to 60 s or past it: on 22.23.4 `npm run test:ci` ends with
       # three or four of them cancelled, on 24.21.0 it passes.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
@@ -107,7 +111,7 @@ jobs:
           CHROME_BIN: /usr/bin/google-chrome
 
       - name: Keep the tested artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: build
           path: build
@@ -124,22 +128,25 @@ jobs:
     permissions:
       # the OIDC token npm exchanges for short-lived publish credentials
       id-token: write
-      # only to push the release tag
+      # only to create the release tag
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # NO registry-url: it writes an .npmrc pinning auth to an empty ${NODE_AUTH_TOKEN}, npm then skips the OIDC
       # exchange and the publish dies with an E404. No `cache` either: this job never installs.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
 
       # Trusted publishing needs npm >= 11.5.1; an older one fails as an auth error rather than as a stale CLI.
+      # Exact, so a new npm only arrives by a bump here: 12.2.2 published 0.3.29 (run 43998981476, 2026-11-17).
       - name: Use an npm that supports trusted publishing
         run: |
-          npm install -g npm@latest
+          npm install -g npm@12.2.2
           echo "npm $(npm --version)"
 
       # Compared against the REGISTRY rather than the previous commit, so a failed publish retries correctly and a
@@ -176,7 +183,7 @@ jobs:
 
       - name: Take the tested build
         if: steps.decide.outputs.changed == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: build
           path: build
@@ -221,10 +228,10 @@ jobs:
         if: steps.decide.outputs.changed == 'true'
         run: npm publish --access public --ignore-scripts --loglevel verbose
 
+      # Through the API, so the checkout keeps no write token on disk.
       - name: Tag the release
         if: steps.decide.outputs.changed == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.decide.outputs.local }}
-        run: |
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
+        run: gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$GITHUB_SHA"
