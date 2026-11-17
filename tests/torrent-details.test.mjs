@@ -52,10 +52,30 @@ test('a tracker added to a running torrent is announced to, and the peer it name
   assert.deepEqual(session.addTrackers(handle, [ws, 'tracker.example.invalid', 'ftp://example.invalid/']),
     ['tracker.example.invalid', 'ftp://example.invalid/'])
   assert.deepEqual(session.addTrackers(handle, [ws]), [])
+  await waitFor('the ws tracker to be kept', () => session.webSocketTrackers(handle).length)
   assert.deepEqual(session.webSocketTrackers(handle), [ws])
   assert.deepEqual((await session.trackers(handle)).map((row) => row.url), [announced.url])
 
   assert.deepEqual(session.addTrackers(0xDEADBEEF, [announced.url]), [announced.url])
+})
+
+test('a ws tracker added to a removed torrent, or to one a remove is taking away, is not kept for its re-add', async (t) => {
+  const defer = teardown(t)
+  const fx = fixture(defer, MiB)
+  const leech = await startEngine(defer, path.join(fx.root, 'leech'), { host: countingHost() })
+  const { session } = leech
+  const handle = await leech.running(session.addTorrentFile(fx.meta.torrent, '/dl'))
+
+  assert.deepEqual(session.addTrackers(handle, ['wss://before-remove.example.invalid/announce']), [])
+  session.removeTorrent(handle)
+  assert.deepEqual(session.addTrackers(handle, ['wss://after-remove.example.invalid/announce']), [])
+  const again = await leech.running(session.addTorrentFile(fx.meta.torrent, '/dl'))
+  assert.equal(again, handle)
+
+  const ws = 'wss://after-re-add.example.invalid/announce'
+  assert.deepEqual(session.addTrackers(again, [ws]), [])
+  await waitFor('the tracker added after the re-add', () => session.webSocketTrackers(again).includes(ws))
+  assert.deepEqual(session.webSocketTrackers(again), [ws])
 })
 
 test('piece availability counts each connected peer that has a piece', async (t) => {

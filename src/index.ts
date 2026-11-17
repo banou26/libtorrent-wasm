@@ -824,11 +824,12 @@ export class Session {
   /**
    * Add trackers to a torrent, running or not, as an add takes them from a magnet or a .torrent.
    * An http, https or udp one joins {@link trackers} after the torrent's own, and libtorrent
-   * announces to it while none before it works. A ws or wss one joins {@link webSocketTrackers}.
-   * A tracker the torrent already has changes nothing.
+   * announces to it while none before it works. A ws or wss one joins {@link webSocketTrackers} on
+   * the next tick, and a running swarm announces to it from its next beat. A tracker the torrent
+   * already has changes nothing.
    *
    * Answers the urls it did not take: any that is not an http, https, udp, ws or wss url, and every
-   * url for a handle the engine never gave out.
+   * url for a handle the engine never gave out. A removed torrent takes them and keeps none.
    */
   addTrackers(handle: number, urls: Iterable<string>): string[] {
     const m = this.mod

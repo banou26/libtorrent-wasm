@@ -1143,12 +1143,17 @@ LT_API int lt_torrent_post_trackers(std::uint32_t id) {
 // an http, https or udp url goes to libtorrent at tier 0, after the torrent's own, and a ws or wss
 // one joins the list lt_torrent_ws_trackers keeps. A url the torrent already has changes nothing.
 // -1 for an id no add gave out, -2 for a url that is none of those.
+// A ws url is kept on the io_context, behind a remove asked before it, and not while a remove asked
+// after it is pending: a re-add of the torrent gets the same id, and would inherit the url.
 LT_API int lt_torrent_add_tracker(std::uint32_t id, char const* url) {
-  if (!g_session || !url || !key_of(id)) return -1;
+  if (!g_session || !url) return -1;
+  auto const* key = key_of(id);
+  if (!key) return -1;
   std::string const u = url;
   if (is_ws_tracker(u)) {
-    keep_ws_tracker(id, u);
-    return 0;
+    return on_torrent(id, [id, u, key = *key](lt::torrent_handle const&) {
+      if (!g_session->removing.count(key)) keep_ws_tracker(id, u);
+    });
   }
   if (!lt::is_valid_tracker_url(u)) return -2;
   return on_torrent(id, [u](lt::torrent_handle const& h) { h.add_tracker(lt::announce_entry(u)); });
