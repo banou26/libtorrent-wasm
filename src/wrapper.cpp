@@ -890,8 +890,11 @@ LT_API int lt_session_tick() {
     auto const start = std::chrono::steady_clock::now();
     // 100 ms is deliberately generous because libtorrent runs in a dedicated Worker the renderer never sees; smaller budgets bounce control back to JS between tiny batches and cap throughput below what the network feeds us, so do not lower it
     auto const deadline = start + std::chrono::milliseconds(100);
+    // poll_one, never poll: poll() also runs every handler that becomes ready while it runs, so a chain of handlers
+    // each readying the next (a check whose storage answers every read at once) held one tick for its whole length.
+    // What is still ready at the deadline stays queued, and the non-zero return has the next tick scheduled.
     while (true) {
-      std::size_t const n = g_session->ioc->poll();
+      std::size_t const n = g_session->ioc->poll_one();
       ran += n;
       if (n == 0) break;
       if (std::chrono::steady_clock::now() > deadline) break;

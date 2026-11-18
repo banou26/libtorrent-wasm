@@ -1773,7 +1773,9 @@ export class Session {
 
   tick() {
     if (this.destroyed) return
-    this.mod._lt_session_tick()
+    // a tick that ends on its time budget leaves work queued, and only the shim's own ticks schedule the next one
+    const shim = (this.mod as unknown as { __FKN?: { scheduleTick?: () => void } }).__FKN
+    if (this.mod._lt_session_tick() > 0) shim?.scheduleTick?.()
     // post_status emits exactly one alert per call, and a parked read() only learns a piece landed
     // from a state update, so keep asking for as long as anything is waiting
     if (this.pieceWaiters.length) {

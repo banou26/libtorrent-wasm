@@ -17,7 +17,8 @@ export interface LtModule {
   _lt_session_create(): number
   /** 1, ending nothing, when called from inside _lt_session_tick. */
   _lt_session_destroy(): number
-  _lt_session_tick(): void
+  /** How many handlers it ran. More than 0 means work may still be queued (a tick ends on its 100 ms budget), so tick again. */
+  _lt_session_tick(): number
   _lt_session_pump_alerts(): void
 
   _lt_alerts_size(): number
