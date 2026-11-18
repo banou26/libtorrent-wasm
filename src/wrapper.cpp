@@ -880,6 +880,8 @@ LT_API int lt_diag_parse_interfaces(char const* str) {
   return static_cast<int>(ifaces.size());
 }
 
+extern "C" void js_schedule_tick();
+
 LT_API int lt_session_tick() {
   if (!g_session) return 0;
   g_in_tick = true;
@@ -892,12 +894,13 @@ LT_API int lt_session_tick() {
     auto const deadline = start + std::chrono::milliseconds(100);
     // poll_one, never poll: poll() also runs every handler that becomes ready while it runs, so a chain of handlers
     // each readying the next (a check whose storage answers every read at once) held one tick for its whole length.
-    // What is still ready at the deadline stays queued, and the non-zero return has the next tick scheduled.
+    // What is still ready at the deadline stays queued, and the cut schedules the next tick itself: the fallback
+    // timer's tick (Session.tick) ignores the return value.
     while (true) {
       std::size_t const n = g_session->ioc->poll_one();
       ran += n;
       if (n == 0) break;
-      if (std::chrono::steady_clock::now() > deadline) break;
+      if (std::chrono::steady_clock::now() > deadline) { js_schedule_tick(); break; }
     }
     g_total_handlers += static_cast<std::int64_t>(ran);
     ++g_tick_count;

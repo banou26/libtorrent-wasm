@@ -1065,6 +1065,9 @@ addToLibrary({
       .catch((e) => console.error('[fkn] onRemoveStorage error', e))
   },
 
+  js_schedule_tick__deps: ['$FKN'],
+  js_schedule_tick() { FKN.scheduleTick() },
+
   js_disk_read__deps: ['$FKN'],
   js_disk_read(id, jobLo, jobHi, fileIdx, offsetLo, offsetHi, len) {
     FKN.stats.diskRead++
