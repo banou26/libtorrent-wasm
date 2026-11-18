@@ -12,6 +12,8 @@ import { waitFor } from './rig/peer-handshake.mjs'
 import { MiB, startEngine, teardown, tempDir } from './rig/stream-engine.mjs'
 
 const BUDGET_MS = 100
+// room for a loaded runner (the longest tick reached 116 ms on 4 CPUs twice oversubscribed, 2026-11-19), which also
+// lets a budget raised to about 190 ms pass
 const LONGEST_TICK_MS = 200
 // the engine's own fallback tick comes every 250 ms, so a tick ended on its budget and not followed at once waits ~150
 const NEXT_TICK_MS = 50
